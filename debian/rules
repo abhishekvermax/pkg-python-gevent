@@ -1,0 +1,21 @@
+#!/usr/bin/make -f
+%:
+	dh  $@
+
+override_dh_auto_build:
+	dh_auto_build
+	PYTHONPATH=.. make --directory doc/ html
+
+override_dh_auto_clean:
+	dh_auto_clean
+	rm -f gevent/*.so
+	rm -f doc/changelog.rst
+	rm -rf doc/_build
+
+override_dh_strip:
+	dh_strip --dbg-package=python-gevent-dbg
+
+override_dh_installdocs:
+	dh_installdocs --link-doc=python-gevent
+
+.PHONY: override_dh_auto_build override_dh_auto_clean override_dh_strip override_dh_installdocs
