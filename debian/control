@@ -32,7 +32,7 @@ Description: gevent is a coroutine-based Python networking library
 Package: python-gevent
 Section: python
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, ${python:Depends}, python-greenlet
+Depends: ${shlibs:Depends}, ${misc:Depends}, ${python:Depends}, python-greenlet | python-codespeak-lib (<< 1.0)
 Suggests: python-gevent-doc, python-gevent-dbg, python-openssl
 Description: gevent is a coroutine-based Python networking library
  gevent uses greenlet to provide a high-level synchronous API on top of
