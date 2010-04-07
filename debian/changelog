@@ -1,4 +1,4 @@
-python-gevent (0.12.2-2) lucid; urgency=low
+python-gevent (0.12.2-2) unstable; urgency=low
 
   * Added optional dependency for python-codespeak-lib instead of
     the newer python-greenlet.
