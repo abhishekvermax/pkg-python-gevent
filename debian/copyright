@@ -69,3 +69,10 @@ The file ./gevent/ssl.py is based on code from the Python ssl module:
 
 and is licensed under Python Software Foundation License (PSFL),
 see `/usr/share/doc/python/copyright'.
+
+The files in ./examples/webchat/static is from FriendFeed:
+
+    Copyright (c) 2009 FriendFeed
+
+and is licensed under Apache License, Version 2.0,
+see `/usr/share/common-licenses/Apache-2.0'.

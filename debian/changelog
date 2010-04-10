@@ -1,3 +1,9 @@
+python-gevent (0.12.2-3) unstable; urgency=low
+
+  * Updated copyright information.
+
+ -- Örjan Persson <orange@fobie.net>  Tue, 20 Apr 2010 19:57:18 +0200
+
 python-gevent (0.12.2-2) unstable; urgency=low
 
   * Added optional dependency for python-codespeak-lib instead of
