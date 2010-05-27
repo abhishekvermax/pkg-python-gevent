@@ -12,7 +12,7 @@ Package: python-gevent-dbg
 Section: debug
 Architecture: any
 Depends: ${misc:Depends}, python-gevent (= ${binary:Version})
-Description: gevent is a coroutine-based Python networking library
+Description: gevent is a coroutine-based Python networking library - debugging symbols
  gevent uses greenlet to provide a high-level synchronous API on top of
  libevent event loop.
  .
@@ -23,7 +23,7 @@ Section: doc
 Architecture: all
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Priority: optional
-Description: gevent is a coroutine-based Python networking library
+Description: gevent is a coroutine-based Python networking library - documentation
  gevent uses greenlet to provide a high-level synchronous API on top of
  libevent event loop.
  .
