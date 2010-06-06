@@ -1,3 +1,10 @@
+python-gevent (0.12.2-5) unstable; urgency=low
+
+  * Added 002-exc_info-leak patch to workaround a problem where exceptions in
+    greenlets under some circumstanes would leak.
+
+ -- Örjan Persson <orange@fobie.net>  Sun, 06 Jun 2010 14:49:27 +0200
+
 python-gevent (0.12.2-4) unstable; urgency=low
 
   * Moved python-sphinx to build-depends instead of indep.
