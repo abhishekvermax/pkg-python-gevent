@@ -3,6 +3,7 @@
 	dh  $@
 
 override_dh_auto_build:
+	cython gevent/*.pyx
 	dh_auto_build
 	PYTHONPATH=.. make --directory doc/ html
 
