@@ -24,10 +24,14 @@ class TestCase(greentest.TestCase):
 
     def _test_gethostbyname(self, hostname, check_ip=None):
         try:
+            if VERBOSE:
+                print 'real_socket.gethostbyname(%r)' % (hostname, )
             real_ip = real_socket.gethostbyname(hostname)
         except Exception, ex:
             real_ip = ex
         try:
+            if VERBOSE:
+                print 'gevent.socket.gethostbyname(%r)' % (hostname, )
             ip = gethostbyname(hostname)
         except Exception, ex:
             ip = ex
@@ -41,6 +45,7 @@ class TestCase(greentest.TestCase):
     PORTS = [80, 0, 53]
     getaddrinfo_args = [(),
                         (AF_UNSPEC, ),
+                        (AF_UNSPEC, SOCK_STREAM, 0, 0),
                         (AF_INET, SOCK_STREAM, ),
                         (AF_UNSPEC, SOCK_DGRAM, ),
                         (AF_INET, SOCK_RAW, ),
@@ -110,8 +115,9 @@ class TestLocal(TestCase):
     def test_1_2_3_4(self):
         self._test('1.2.3.4')
 
-    def test_notexistent(self):
+    def SKIP_test_notexistent(self):
         # not really interesting because the original gethostbyname() is called for everything without dots
+        # disabled because it takes too much time on windows for some reason
         self._test('notexistent')
 
     def test_None(self):

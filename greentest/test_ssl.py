@@ -7,13 +7,10 @@ import test_support
 import asyncore
 import socket
 import select
-import errno
-import subprocess
 import time
 import os
 import pprint
 import urllib, urlparse
-import shutil
 import traceback
 
 from BaseHTTPServer import HTTPServer
@@ -1081,10 +1078,14 @@ else:
                                         ssl_version=ssl.PROTOCOL_TLSv1)
                     s.connect((HOST, server.port))
                 except ssl.SSLError, x:
-                    raise support.TestFailed("Unexpected SSL error:  " + str(x))
+                    raise test_support.TestFailed("Unexpected SSL error:  " + str(x))
                 except Exception, x:
-                    raise support.TestFailed("Unexpected exception:  " + str(x))
+                    raise test_support.TestFailed("Unexpected exception:  " + str(x))
                 else:
+                    try:
+                        bytearray
+                    except NameError:
+                        bytearray = None
                     # helper methods for standardising recv* method signatures
                     def _recv_into():
                         b = bytearray("\0"*100)
@@ -1108,6 +1109,8 @@ else:
                         ('recv_into', _recv_into, True, []),
                         ('recvfrom_into', _recvfrom_into, False, []),
                     ]
+                    if bytearray is None:
+                        recv_methods = recv_methods[:-2]
                     data_prefix = u"PREFIX_"
 
                     for meth_name, send_meth, expect_success, args in send_methods:
@@ -1117,7 +1120,7 @@ else:
                             outdata = s.read()
                             outdata = outdata.decode('ASCII', 'strict')
                             if outdata != indata.lower():
-                                raise support.TestFailed(
+                                raise test_support.TestFailed(
                                     "While sending with <<%s>> bad data "
                                     "<<%r>> (%d) received; "
                                     "expected <<%r>> (%d)\n" % (
@@ -1127,12 +1130,12 @@ else:
                                 )
                         except ValueError, e:
                             if expect_success:
-                                raise support.TestFailed(
+                                raise test_support.TestFailed(
                                     "Failed to send with method <<%s>>; "
                                     "expected to succeed.\n" % (meth_name,)
                                 )
                             if not str(e).startswith(meth_name):
-                                raise support.TestFailed(
+                                raise test_support.TestFailed(
                                     "Method <<%s>> failed with unexpected "
                                     "exception message: %s\n" % (
                                         meth_name, e
@@ -1146,7 +1149,7 @@ else:
                             outdata = recv_meth(*args)
                             outdata = outdata.decode('ASCII', 'strict')
                             if outdata != indata.lower():
-                                raise support.TestFailed(
+                                raise test_support.TestFailed(
                                     "While receiving with <<%s>> bad data "
                                     "<<%r>> (%d) received; "
                                     "expected <<%r>> (%d)\n" % (
@@ -1156,12 +1159,12 @@ else:
                                 )
                         except ValueError, e:
                             if expect_success:
-                                raise support.TestFailed(
+                                raise test_support.TestFailed(
                                     "Failed to receive with method <<%s>>; "
                                     "expected to succeed.\n" % (meth_name,)
                                 )
                             if not str(e).startswith(meth_name):
-                                raise support.TestFailed(
+                                raise test_support.TestFailed(
                                     "Method <<%s>> failed with unexpected "
                                     "exception message: %s\n" % (
                                         meth_name, e
@@ -1208,8 +1211,8 @@ def test_main(verbose=False):
 
     test_support.run_unittest(*tests)
 
-    if _have_threads:
-        test_support.threading_cleanup(*thread_info)
+    #if _have_threads:
+    #    test_support.threading_cleanup(*thread_info)
 
 if __name__ == "__main__":
     test_main()

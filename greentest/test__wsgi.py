@@ -1,39 +1,13 @@
-import sys
+import gevent
 from gevent import wsgi
-from wsgi_test import *
+import test__pywsgi
+from test__pywsgi import *
 
-del TestHttps, TestChunkedApp, TestBigChunks
-
+del TestHttps
+test__pywsgi.server_implements_chunked = False
+test__pywsgi.server_implements_pipeline = False
+test__pywsgi.server_implements_100continue = False
 TestCase.get_wsgi_module = lambda *args: wsgi
-
-class Expected(Exception):
-    pass
-
-class TestError(TestCase):
-
-    @staticmethod
-    def application(env, start_response):
-        raise Expected
-
-    @property
-    def url(self):
-        return 'http://127.0.0.1:%s' % self.port
-
-    def test(self):
-        try:
-            r = urllib2.urlopen(self.url)
-            raise AssertionError('Must raise HTTPError, returned %r: %s' % (r, r.code))
-        except urllib2.HTTPError, ex:
-            assert ex.code == 500, ex
-            assert ex.msg == 'Internal Server Error', ex
-
-
-class TestError_after_start_response(TestError):
-
-    @staticmethod
-    def application(env, start_response):
-        start_response('200 OK', [('Content-Type', 'text/plain')])
-        raise Expected
 
 
 if __name__ == '__main__':

@@ -1,15 +1,25 @@
 # Copyright (c) 2009-2010 Denis Bilenko. See LICENSE for details.
+"""Managing greenlets in a group.
 
-from collections import deque
+The :class:`Group` class in this module abstracts a group of running greenlets.
+When a greenlet dies, it's automatically removed from the group.
+
+The :class:`Pool` which a subclass of :class:`Group` provides a way to limit
+concurrency: its :meth:`spawn <Pool.spawn>` blocks if the number of greenlets
+in the pool would exceed the limit.
+"""
+
 from gevent.hub import GreenletExit, getcurrent
 from gevent.greenlet import joinall, Greenlet
 from gevent.timeout import Timeout
+from gevent.event import Event
+from gevent.coros import Semaphore, DummySemaphore
 
-__all__ = ['GreenletSet', 'Pool']
+__all__ = ['Group', 'Pool']
 
 
-class GreenletSet(object):
-    """Maintain a set of greenlets that are still running.
+class Group(object):
+    """Maintain a group of greenlets that are still running.
 
     Links to each item and removes it upon notification.
     """
@@ -23,12 +33,14 @@ class GreenletSet(object):
                 greenlet.rawlink(self.discard)
         # each item we kill we place in dying, to avoid killing the same greenlet twice
         self.dying = set()
+        self._empty_event = Event()
+        self._empty_event.set()
 
     def __repr__(self):
         try:
             classname = self.__class__.__name__
         except AttributeError:
-            classname = 'GreenletSet' # XXX check if 2.4 really uses this line
+            classname = 'Group' # XXX check if 2.4 really uses this line
         return '<%s at %s %s>' % (classname, hex(id(self)), self.greenlets)
 
     def __len__(self):
@@ -43,10 +55,17 @@ class GreenletSet(object):
     def add(self, greenlet):
         greenlet.rawlink(self.discard)
         self.greenlets.add(greenlet)
+        self._empty_event.clear()
 
     def discard(self, greenlet):
         self.greenlets.discard(greenlet)
         self.dying.discard(greenlet)
+        if not self.greenlets:
+            self._empty_event.set()
+
+    def start(self, greenlet):
+        self.add(greenlet)
+        greenlet.start()
 
     def spawn(self, *args, **kwargs):
         add = self.add
@@ -74,34 +93,36 @@ class GreenletSet(object):
 #         self.add = RaiseException("This %s has been closed" % self.__class__.__name__)
 
     def join(self, timeout=None, raise_error=False):
-        timeout = Timeout.start_new(timeout)
+        if raise_error:
+            greenlets = self.greenlets.copy()
+            self._empty_event.wait(timeout=timeout)
+            for greenlet in greenlets:
+                if not greenlet.successful():
+                    raise greenlet.exception
+        else:
+            self._empty_event.wait(timeout=timeout)
+
+    def kill(self, exception=GreenletExit, block=True, timeout=None):
+        timer = Timeout.start_new(timeout)
         try:
             try:
                 while self.greenlets:
-                    joinall(self.greenlets, raise_error=raise_error)
+                    for greenlet in list(self.greenlets):
+                        if greenlet not in self.dying:
+                            greenlet.kill(exception, block=False)
+                            self.dying.add(greenlet)
+                    if not block:
+                        break
+                    joinall(self.greenlets)
             except Timeout, ex:
-                if ex is not timeout:
+                if ex is not timer:
                     raise
-        finally:
-            timeout.cancel()
-
-    def kill(self, exception=GreenletExit, block=False, timeout=None):
-        timer = Timeout.start_new(timeout)
-        try:
-            while self.greenlets:
-                for greenlet in self.greenlets:
-                    if greenlet not in self.dying:
-                        greenlet.kill(exception)
-                        self.dying.add(greenlet)
-                if not block:
-                    break
-                joinall(self.greenlets)
         finally:
             timer.cancel()
 
-    def killone(self, greenlet, exception=GreenletExit, block=False, timeout=None):
+    def killone(self, greenlet, exception=GreenletExit, block=True, timeout=None):
         if greenlet not in self.dying and greenlet in self.greenlets:
-            greenlet.kill(exception)
+            greenlet.kill(exception, block=False)
             self.dying.add(greenlet)
             if block:
                 greenlet.join(timeout)
@@ -117,6 +138,12 @@ class GreenletSet(object):
         else:
             return self.spawn(func, *args, **kwds).get()
 
+    def apply_cb(self, func, args=None, kwds=None, callback=None):
+        result = self.apply(func, args, kwds)
+        if callback is not None:
+            Greenlet.spawn(callback, result)
+        return result
+
     def apply_async(self, func, args=None, kwds=None, callback=None):
         """A variant of the apply() method which returns a Greenlet object.
 
@@ -126,14 +153,24 @@ class GreenletSet(object):
             args = ()
         if kwds is None:
             kwds = {}
-        greenlet = self.spawn(func, *args, **kwds)
-        if callback is not None:
-            greenlet.link(pass_value(callback))
-        return greenlet
+        if self.full():
+            # cannot call spawn() directly because it will block
+            return Greenlet.spawn(self.apply_cb, func, args, kwds, callback)
+        else:
+            greenlet = self.spawn(func, *args, **kwds)
+            if callback is not None:
+                greenlet.link(pass_value(callback))
+            return greenlet
 
     def map(self, func, iterable):
         greenlets = [self.spawn(func, item) for item in iterable]
         return [greenlet.get() for greenlet in greenlets]
+
+    def map_cb(self, func, iterable, callback=None):
+        result = self.map(func, iterable)
+        if callback is not None:
+            callback(result)
+        return result
 
     def map_async(self, func, iterable, callback=None):
         """
@@ -142,41 +179,49 @@ class GreenletSet(object):
         If callback is specified then it should be a callable which accepts a
         single argument.
         """
-        greenlets = [self.spawn(func, item) for item in iterable]
-        result = self.spawn(get_values, greenlets)
-        if callback is not None:
-            result.link(pass_value(callback))
-        return result
+        return Greenlet.spawn(self.map_cb, func, iterable, callback)
 
     def imap(self, func, iterable):
-        """An equivalent of itertools.imap()"""
-        greenlets = [self.spawn(func, item) for item in iterable]
-        for greenlet in greenlets:
-            yield greenlet.get()
+        """An equivalent of itertools.imap()
+        
+        **TODO**: Fix this.
+        """
+        return iter(self.map(func, iterable))
 
     def imap_unordered(self, func, iterable):
         """The same as imap() except that the ordering of the results from the
-        returned iterator should be considered arbitrary."""
-        from gevent.queue import Queue
-        q = Queue()
-        greenlets = [self.spawn(func, item) for item in iterable]
-        for greenlet in greenlets:
-            greenlet.rawlink(q.put)
-        for _ in xrange(len(greenlets)):
-            yield q.get().get()
+        returned iterator should be considered arbitrary.
+        
+        **TODO**: Fix this.
+        """
+        return iter(self.map(func, iterable))
 
     def full(self):
         return False
 
+    def wait_available(self):
+        pass
 
-class Pool(GreenletSet):
 
-    def __init__(self, size=None):
+GreenletSet = Group # the old name; will be deprecated in the future
+
+
+class Pool(Group):
+
+    def __init__(self, size=None, greenlet_class=None):
         if size is not None and size < 0:
             raise ValueError('Invalid size for pool (positive integer or None required): %r' % (size, ))
-        GreenletSet.__init__(self)
+        Group.__init__(self)
         self.size = size
-        self.waiting = deque()
+        if greenlet_class is not None:
+            self.greenlet_class = greenlet_class
+        if size is None:
+            self._semaphore = DummySemaphore()
+        else:
+            self._semaphore = Semaphore(size)
+
+    def wait_available(self):
+        self._semaphore.wait()
 
     def full(self):
         return self.free_count() <= 0
@@ -184,32 +229,60 @@ class Pool(GreenletSet):
     def free_count(self):
         if self.size is None:
             return 1
-        return max(0, self.size - len(self) - len(self.waiting))
+        return max(0, self.size - len(self))
 
     def start(self, greenlet):
-        if self.size is not None and len(self) >= self.size:
-            self.waiting.append(greenlet)
-        else:
-            greenlet.start()
+        self._semaphore.acquire()
+        try:
             self.add(greenlet)
+        except:
+            self._semaphore.release()
+            raise
+        greenlet.start()
 
-    def spawn(self, function, *args, **kwargs):
-        greenlet = Greenlet(function, *args, **kwargs)
-        self.start(greenlet)
+    def spawn(self, *args, **kwargs):
+        self._semaphore.acquire()
+        try:
+            greenlet = self.greenlet_class.spawn(*args, **kwargs)
+            self.add(greenlet)
+        except:
+            self._semaphore.release()
+            raise
+        return greenlet
+
+    def spawn_link(self, *args, **kwargs):
+        self._semaphore.acquire()
+        try:
+            greenlet = self.greenlet_class.spawn_link(*args, **kwargs)
+            self.add(greenlet)
+        except:
+            self._semaphore.release()
+            raise
+        return greenlet
+
+    def spawn_link_value(self, *args, **kwargs):
+        self._semaphore.acquire()
+        try:
+            greenlet = self.greenlet_class.spawn_link_value(*args, **kwargs)
+            self.add(greenlet)
+        except:
+            self._semaphore.release()
+            raise
+        return greenlet
+
+    def spawn_link_exception(self, *args, **kwargs):
+        self._semaphore.acquire()
+        try:
+            greenlet = self.greenlet_class.spawn_link_exception(*args, **kwargs)
+            self.add(greenlet)
+        except:
+            self._semaphore.release()
+            raise
         return greenlet
 
     def discard(self, greenlet):
-        GreenletSet.discard(self, greenlet)
-        while self.waiting and len(self) < self.size:
-            greenlet = self.waiting.popleft()
-            greenlet.start()
-            self.add(greenlet)
-
-    def kill(self, exception=GreenletExit, block=False, timeout=None):
-        for greenlet in self.waiting:
-            greenlet.kill(exception)
-        self.waiting.clear()
-        return GreenletSet.kill(self, exception=exception, block=block, timeout=timeout)
+        Group.discard(self, greenlet)
+        self._semaphore.release()
 
 
 def get_values(greenlets):

@@ -47,16 +47,18 @@ __all__ = ['create_connection',
            'timeout',
            'ssl',
            'sslerror',
-           'SocketType']
+           'SocketType',
+           'wait_read',
+           'wait_write',
+           'wait_readwrite']
 
 import sys
 import errno
 import time
 import random
 import re
-import platform
 
-is_windows = platform.system() == 'Windows'
+is_windows = sys.platform == 'win32'
 
 if is_windows:
     # no such thing as WSAEPERM or error code 10001 according to winsock.h or MSDN
@@ -93,6 +95,9 @@ for name in __socket__.__all__:
         if isinstance(value, (int, basestring)):
             globals()[name] = value
             __all__.append(name)
+    elif name == 'getfqdn':
+        globals()[name] = getattr(__socket__, name)
+        __all__.append(name)
 
 del name, value
 
@@ -119,7 +124,7 @@ except AttributeError:
 # XXX: implement blocking functions that are not yet implemented
 # XXX: add test that checks that socket.__all__ matches gevent.socket.__all__ on all supported platforms
 
-from gevent.hub import getcurrent, get_hub, spawn_raw
+from gevent.hub import getcurrent, get_hub
 from gevent import core
 
 _ip4_re = re.compile('^[\d\.]+$')
@@ -133,31 +138,84 @@ def _wait_helper(ev, evtype):
         current.switch(ev)
 
 
-def wait_read(fileno, timeout=-1, timeout_exc=_socket.timeout('timed out')):
-    evt = core.read_event(fileno, _wait_helper, timeout, (getcurrent(), timeout_exc))
+def wait_read(fileno, timeout=None, timeout_exc=timeout('timed out'), event=None):
+    """Block the current greenlet until *fileno* is ready to read.
+
+    If *timeout* is non-negative, then *timeout_exc* is raised after *timeout* second has passed.
+    By default *timeout_exc* is ``socket.timeout('timed out')``.
+
+    If :func:`cancel_wait` is called, raise ``socket.error(EBADF, 'File descriptor was closed in another greenlet')``.
+    """
+    if event is None:
+        event = core.read_event(fileno, _wait_helper, timeout, (getcurrent(), timeout_exc))
+    else:
+        assert event.callback == _wait_helper, event.callback
+        assert event.arg is None, 'This event is already used by another greenlet: %r' % (event.arg, )
+        event.arg = (getcurrent(), timeout_exc)
+        event.add(timeout)
     try:
         switch_result = get_hub().switch()
-        assert evt is switch_result, 'Invalid switch into wait_read(): %r' % (switch_result, )
+        assert event is switch_result, 'Invalid switch into wait_read(): %r' % (switch_result, )
     finally:
-        evt.cancel()
+        event.cancel()
+        event.arg = None
 
 
-def wait_write(fileno, timeout=-1, timeout_exc=_socket.timeout('timed out')):
-    evt = core.write_event(fileno, _wait_helper, timeout, (getcurrent(), timeout_exc))
+def wait_write(fileno, timeout=None, timeout_exc=timeout('timed out'), event=None):
+    """Block the current greenlet until *fileno* is ready to write.
+
+    If *timeout* is non-negative, then *timeout_exc* is raised after *timeout* second has passed.
+    By default *timeout_exc* is ``socket.timeout('timed out')``.
+
+    If :func:`cancel_wait` is called, raise ``socket.error(EBADF, 'File descriptor was closed in another greenlet')``.
+    """
+    if event is None:
+        event = core.write_event(fileno, _wait_helper, timeout, (getcurrent(), timeout_exc))
+    else:
+        assert event.callback == _wait_helper, event.callback
+        assert event.arg is None, 'This event is already used by another greenlet: %r' % (event.arg, )
+        event.arg = (getcurrent(), timeout_exc)
+        event.add(timeout)
     try:
         switch_result = get_hub().switch()
-        assert evt is switch_result, 'Invalid switch into wait_write(): %r' % (switch_result, )
+        assert event is switch_result, 'Invalid switch into wait_write(): %r' % (switch_result, )
     finally:
-        evt.cancel()
+        event.arg = None
+        event.cancel()
 
 
-def wait_readwrite(fileno, timeout=-1, timeout_exc=_socket.timeout('timed out')):
-    evt = core.readwrite_event(fileno, _wait_helper, timeout, (getcurrent(), timeout_exc))
+def wait_readwrite(fileno, timeout=None, timeout_exc=timeout('timed out'), event=None):
+    """Block the current greenlet until *fileno* is ready to read or write.
+
+    If *timeout* is non-negative, then *timeout_exc* is raised after *timeout* second has passed.
+    By default *timeout_exc* is ``socket.timeout('timed out')``.
+
+    If :func:`cancel_wait` is called, raise ``socket.error(EBADF, 'File descriptor was closed in another greenlet')``.
+    """
+    if event is None:
+        event = core.readwrite_event(fileno, _wait_helper, timeout, (getcurrent(), timeout_exc))
+    else:
+        assert event.callback == _wait_helper, event.callback
+        assert event.arg is None, 'This event is already used by another greenlet: %r' % (event.arg, )
+        event.arg = (getcurrent(), timeout_exc)
+        event.add(timeout)
     try:
         switch_result = get_hub().switch()
-        assert evt is switch_result, 'Invalid switch into wait_readwrite(): %r' % (switch_result, )
+        assert event is switch_result, 'Invalid switch into wait_readwrite(): %r' % (switch_result, )
     finally:
-        evt.cancel()
+        event.arg = None
+        event.cancel()
+
+
+def __cancel_wait(event):
+    if event.pending:
+        arg = event.arg
+        if arg is not None:
+            arg[0].throw(error(errno.EBADF, 'File descriptor was closed in another greenlet'))
+
+
+def cancel_wait(event):
+    core.active_event(__cancel_wait, event)
 
 
 if sys.version_info[:2] <= (2, 4):
@@ -181,6 +239,13 @@ if sys.version_info[:2] <= (2, 4):
                 if self._close:
                     self._sock.close()
                 self._sock = None
+
+
+if sys.version_info[:2] < (2, 7):
+    _get_memory = buffer
+else:
+    def _get_memory(string, offset):
+        return memoryview(string)[offset:]
 
 
 class _closedsocket(object):
@@ -212,6 +277,9 @@ class socket(object):
                 self._sock = _sock
                 self.timeout = _socket.getdefaulttimeout()
         self._sock.setblocking(0)
+        self._read_event = core.event(core.EV_READ, self.fileno(), _wait_helper)
+        self._write_event = core.event(core.EV_WRITE, self.fileno(), _wait_helper)
+        self._rw_event = core.event(core.EV_READ|core.EV_WRITE, self.fileno(), _wait_helper)
 
     def __repr__(self):
         return '<%s at %s %s>' % (type(self).__name__, hex(id(self)), self._formatinfo())
@@ -243,24 +311,23 @@ class socket(object):
             result += ' timeout=' + str(self.timeout)
         return result
 
-    @property
-    def fd(self):
-        import warnings
-        warnings.warn("socket.fd is deprecated; use socket._sock", DeprecationWarning, stacklevel=2)
-        return self._sock
-
     def accept(self):
+        sock = self._sock
         while True:
             try:
-                client, addr = self._sock.accept()
+                client_socket, address = sock.accept()
                 break
             except error, ex:
                 if ex[0] != errno.EWOULDBLOCK or self.timeout == 0.0:
                     raise
-            wait_read(self._sock.fileno(), timeout=self.timeout)
-        return socket(_sock=client), addr
+                sys.exc_clear()
+            wait_read(sock.fileno(), timeout=self.timeout, event=self._read_event)
+        return socket(_sock=client_socket), address
 
     def close(self):
+        cancel_wait(self._rw_event)
+        cancel_wait(self._read_event)
+        cancel_wait(self._write_event)
         self._sock = _closedsocket()
         dummy = self._sock._dummy
         for method in _delegate_methods:
@@ -281,7 +348,7 @@ class socket(object):
                 if not result or result == EISCONN:
                     break
                 elif (result in (EWOULDBLOCK, EINPROGRESS, EALREADY)) or (result == EINVAL and is_windows):
-                    wait_readwrite(sock.fileno())
+                    wait_readwrite(sock.fileno(), event=self._rw_event)
                 else:
                     raise error(result, strerror(result))
         else:
@@ -297,7 +364,7 @@ class socket(object):
                     timeleft = end - time.time()
                     if timeleft <= 0:
                         raise timeout('timed out')
-                    wait_readwrite(sock.fileno(), timeout=timeleft)
+                    wait_readwrite(sock.fileno(), timeout=timeleft, event=self._rw_event)
                 else:
                     raise error(result, strerror(result))
 
@@ -315,83 +382,112 @@ class socket(object):
     def dup(self):
         """dup() -> socket object
 
-        Return a new socket object connected to the same system resource."""
+        Return a new socket object connected to the same system resource.
+        Note, that the new socket does not inherit the timeout."""
         return socket(_sock=self._sock)
 
     def makefile(self, mode='r', bufsize=-1):
+        # note that this does not inherit timeout either (intentionally, because that's
+        # how the standard socket behaves)
         return _fileobject(self.dup(), mode, bufsize)
 
     def recv(self, *args):
+        sock = self._sock # keeping the reference so that fd is not closed during waiting
         while True:
             try:
-                return self._sock.recv(*args)
+                return sock.recv(*args)
             except error, ex:
+                if ex[0] == errno.EBADF:
+                    return ''
                 if ex[0] != EWOULDBLOCK or self.timeout == 0.0:
                     raise
                 # QQQ without clearing exc_info test__refcount.test_clean_exit fails
                 sys.exc_clear()
-            wait_read(self.fileno(), timeout=self.timeout)
+            try:
+                wait_read(sock.fileno(), timeout=self.timeout, event=self._read_event)
+            except error, ex:
+                if ex[0] == errno.EBADF:
+                    return ''
+                raise
 
     def recvfrom(self, *args):
+        sock = self._sock
         while True:
             try:
-                return self._sock.recvfrom(*args)
+                return sock.recvfrom(*args)
             except error, ex:
-                sys.exc_clear()
                 if ex[0] != EWOULDBLOCK or self.timeout == 0.0:
-                    raise ex
-            wait_read(self._sock.fileno(), timeout=self.timeout)
+                    raise
+                sys.exc_clear()
+            wait_read(sock.fileno(), timeout=self.timeout, event=self._read_event)
 
     def recvfrom_into(self, *args):
+        sock = self._sock
         while True:
             try:
-                return self._sock.recvfrom_into(*args)
+                return sock.recvfrom_into(*args)
             except error, ex:
                 if ex[0] != EWOULDBLOCK or self.timeout == 0.0:
                     raise
                 sys.exc_clear()
-            wait_read(self._sock.fileno(), timeout=self.timeout)
+            wait_read(sock.fileno(), timeout=self.timeout, event=self._read_event)
 
     def recv_into(self, *args):
+        sock = self._sock
         while True:
             try:
-                return self._sock.recv_into(*args)
+                return sock.recv_into(*args)
             except error, ex:
+                if ex[0] == errno.EBADF:
+                    return 0
                 if ex[0] != EWOULDBLOCK or self.timeout == 0.0:
                     raise
                 sys.exc_clear()
-            wait_read(self._sock.fileno(), timeout=self.timeout)
+            try:
+                wait_read(sock.fileno(), timeout=self.timeout, event=self._read_event)
+            except error, ex:
+                if ex[0] == errno.EBADF:
+                    return 0
+                raise
 
     def send(self, data, flags=0, timeout=timeout_default):
+        sock = self._sock
         if timeout is timeout_default:
             timeout = self.timeout
         try:
-            return self._sock.send(data, flags)
+            return sock.send(data, flags)
         except error, ex:
             if ex[0] != EWOULDBLOCK or timeout == 0.0:
                 raise
             sys.exc_clear()
-            wait_write(self._sock.fileno(), timeout=timeout)
             try:
-                return self._sock.send(data, flags)
+                wait_write(sock.fileno(), timeout=timeout, event=self._write_event)
+            except error, ex:
+                if ex[0] == errno.EBADF:
+                    return 0
+                raise
+            try:
+                return sock.send(data, flags)
             except error, ex2:
                 if ex2[0] == EWOULDBLOCK:
                     return 0
                 raise
 
     def sendall(self, data, flags=0):
+        if isinstance(data, unicode):
+            data = data.encode()
         # this sendall is also reused by SSL subclasses (both from ssl and sslold modules),
         # so it should not call self._sock methods directly
         if self.timeout is None:
             data_sent = 0
             while data_sent < len(data):
-                data_sent += self.send(data[data_sent:], flags)
+                data_sent += self.send(_get_memory(data, data_sent), flags)
         else:
             timeleft = self.timeout
             end = time.time() + timeleft
             data_sent = 0
             while True:
-                data_sent += self.send(data[data_sent:], flags, timeout=timeleft)
+                data_sent += self.send(_get_memory(data, data_sent), flags, timeout=timeleft)
                 if data_sent >= len(data):
                     break
                 timeleft = end - time.time()
@@ -399,15 +495,16 @@ class socket(object):
                     raise timeout('timed out')
 
     def sendto(self, *args):
+        sock = self._sock
         try:
-            return self._sock.sendto(*args)
+            return sock.sendto(*args)
         except error, ex:
             if ex[0] != EWOULDBLOCK or timeout == 0.0:
                 raise
             sys.exc_clear()
-            wait_write(self.fileno(), timeout=self.timeout)
+            wait_write(sock.fileno(), timeout=self.timeout, event=self._write_event)
             try:
-                return self._sock.sendto(*args)
+                return sock.sendto(*args)
             except error, ex2:
                 if ex2[0] == EWOULDBLOCK:
                     return 0
@@ -447,40 +544,28 @@ class socket(object):
 
 SocketType = socket
 
+if hasattr(_socket, 'socketpair'):
+    def socketpair(*args):
+        one, two = _socket.socketpair(*args)
+        return socket(_sock=one), socket(_sock=two)
+else:
+    __all__.remove('socketpair')
 
-def socketpair(*args):
-    one, two = _socket.socketpair(*args)
-    return socket(_sock=one), socket(_sock=two)
+if hasattr(_socket, 'fromfd'):
+    def fromfd(*args):
+        return socket(_sock=_socket.fromfd(*args))
+else:
+    __all__.remove('fromfd')
 
 
-def fromfd(*args):
-    return socket(_sock=_socket.fromfd(*args))
-
-
-def bind_and_listen(descriptor, addr=('', 0), backlog=50, reuse_addr=True):
+def bind_and_listen(descriptor, address=('', 0), backlog=50, reuse_addr=True):
     if reuse_addr:
         try:
             descriptor.setsockopt(SOL_SOCKET, SO_REUSEADDR, descriptor.getsockopt(SOL_SOCKET, SO_REUSEADDR) | 1)
         except error:
             pass
-    descriptor.bind(addr)
+    descriptor.bind(address)
     descriptor.listen(backlog)
-
-
-def socket_bind_and_listen(*args, **kwargs):
-    import warnings
-    warnings.warn("gevent.socket.socket_bind_and_listen is renamed to bind_and_listen", DeprecationWarning, stacklevel=2)
-    bind_and_listen(*args, **kwargs)
-    return args[0]
-
-
-def set_reuse_addr(descriptor):
-    import warnings
-    warnings.warn("gevent.socket.set_reuse_addr is deprecated", DeprecationWarning, stacklevel=2)
-    try:
-        descriptor.setsockopt(SOL_SOCKET, SO_REUSEADDR, descriptor.getsockopt(SOL_SOCKET, SO_REUSEADDR) | 1)
-    except error:
-        pass
 
 
 def tcp_listener(address, backlog=50, reuse_addr=True):
@@ -490,56 +575,12 @@ def tcp_listener(address, backlog=50, reuse_addr=True):
     return sock
 
 
-def connect_tcp(address, localaddr=None):
-    """
-    Create a TCP connection to address (host, port) and return the socket.
-    Optionally, bind to localaddr (host, port) first.
-    """
-    import warnings
-    warnings.warn("gevent.socket.connect_tcp is deprecated", DeprecationWarning, stacklevel=2)
-    desc = socket()
-    if localaddr is not None:
-        desc.bind(localaddr)
-    desc.connect(address)
-    return desc
-
-
-def tcp_server(listensocket, server, *args, **kw):
-    """
-    Given a socket, accept connections forever, spawning greenlets
-    and executing *server* for each new incoming connection.
-    When *listensocket* is closed, the ``tcp_server()`` greenlet will end.
-
-    listensocket
-        The socket from which to accept connections.
-    server
-        The callable to call when a new connection is made.
-    \*args
-        The positional arguments to pass to *server*.
-    \*\*kw
-        The keyword arguments to pass to *server*.
-    """
-    import warnings
-    warnings.warn("gevent.socket.tcp_server is deprecated", DeprecationWarning, stacklevel=2)
-    try:
-        try:
-            while True:
-                client_socket = listensocket.accept()
-                spawn_raw(server, client_socket, *args, **kw)
-        except error, e:
-            # Broken pipe means it was shutdown
-            if e[0] != 32:
-                raise
-    finally:
-        listensocket.close()
-
-
 try:
     _GLOBAL_DEFAULT_TIMEOUT = __socket__._GLOBAL_DEFAULT_TIMEOUT
 except AttributeError:
     _GLOBAL_DEFAULT_TIMEOUT = object()
 
-def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT):
+def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT, source_address=None):
     """Connect to *address* and return the socket object.
 
     Convenience function.  Connect to *address* (a 2-tuple ``(host,
@@ -547,7 +588,9 @@ def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT):
     *timeout* parameter will set the timeout on the socket instance
     before attempting to connect.  If no *timeout* is supplied, the
     global default timeout setting returned by :func:`getdefaulttimeout`
-    is used.
+    is used. If *source_address* is set it must be a tuple of (host, port)
+    for the socket to bind as a source address before making the connection.
+    An host of '' or port 0 tells the OS to use the default.
     """
 
     msg = "getaddrinfo returns an empty list"
@@ -559,6 +602,8 @@ def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT):
             sock = socket(af, socktype, proto)
             if timeout is not _GLOBAL_DEFAULT_TIMEOUT:
                 sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
             sock.connect(sa)
             return sock
         except error, msg:
@@ -640,9 +685,9 @@ else:
             raise NotImplementedError('family is not among AF_UNSPEC/AF_INET/AF_INET6: %r' % (family, ))
 
         socktype_proto = [(SOCK_STREAM, 6), (SOCK_DGRAM, 17), (SOCK_RAW, 0)]
-        if socktype is not None:
+        if socktype:
             socktype_proto = [(x, y) for (x, y) in socktype_proto if socktype == x]
-        if proto is not None:
+        if proto:
             socktype_proto = [(x, y) for (x, y) in socktype_proto if proto == y]
 
         result = []
@@ -650,6 +695,7 @@ else:
             for socktype, proto in socktype_proto:
                 result.append((family, socktype, proto, '', (inet_ntop(family, addr), port)))
         return result
+        # TODO libevent2 has getaddrinfo that is probably better than the hack above; should wrap that.
 
 
 _have_ssl = False
