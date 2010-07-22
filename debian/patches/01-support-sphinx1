@@ -1,0 +1,29 @@
+Index: python-gevent/doc/mysphinxext.py
+===================================================================
+--- python-gevent.orig/doc/mysphinxext.py	2010-07-22 16:01:01.000000000 +0200
++++ python-gevent/doc/mysphinxext.py	2010-07-22 16:01:09.000000000 +0200
+@@ -18,8 +18,12 @@
+ 
+     type = node['reftype']
+     target = node['reftarget']
+-    modname = node['modname']
+-    classname = node['classname']
++    if node.has_key('py:module'):
++        modname = node['py:module']
++        classname = node['py:class']
++    else:
++        modname = node['modname']
++        classname = node['classname']
+ 
+     if modname and classname:
+         return
+@@ -28,7 +32,8 @@
+         newnode = nodes.reference('', '')
+         newnode['refuri'] = refuri
+         newnode['reftitle'] = reftitle
+-        newnode['class'] = 'external-xref'
++        newnode['py:class'] = 'external-xref'
++        newnode['classname'] = 'external-xref'
+         newnode.append(contnode)
+         msg = 'Resolved missing-reference: :%5s:`%s` -> %s' % (type, target, refuri)
+         if noisy >= 1 or msg not in message_cache:

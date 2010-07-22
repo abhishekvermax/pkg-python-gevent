@@ -3,6 +3,7 @@ python-gevent (0.13.0-1) unstable; urgency=low
   * New upstream version (Closes: #589268).
   * Removed cython dependency.
   * Updated doc package and depends on libjs-jquery.
+  * Added support for sphinx 1.0b1 (Closes: #588628).
 
  -- Örjan Persson <orange@fobie.net>  Thu, 22 Jul 2010 12:09:58 +0200
 
