@@ -1,3 +1,9 @@
+python-gevent (0.13.0-1) unstable; urgency=low
+
+  * New upstream version (Closes: #589268).
+
+ -- Örjan Persson <orange@fobie.net>  Thu, 22 Jul 2010 12:09:58 +0200
+
 python-gevent (0.12.2-6) unstable; urgency=low
 
   * Added missing set_exc_info function. Thanks to Chris Lamb for the
