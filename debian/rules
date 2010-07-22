@@ -3,15 +3,14 @@
 	dh  $@
 
 override_dh_auto_build:
-	cython gevent/*.pyx
 	dh_auto_build
 	PYTHONPATH=.. make --directory doc/ html
 
 override_dh_auto_clean:
 	dh_auto_clean
 	rm -f gevent/*.so
+	cd doc && make clean
 	rm -f doc/changelog.rst
-	rm -rf doc/_build
 
 override_dh_strip:
 	dh_strip --dbg-package=python-gevent-dbg
