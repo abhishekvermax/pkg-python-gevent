@@ -227,9 +227,7 @@ class TestPool(greentest.TestCase):
         self.assertEqual(sorted(it), map(sqr, range(1000)))
 
     def test_terminate(self):
-        result = self.pool.map_async(
-            gevent.sleep, [0.1 for i in range(1000)]
-            )
+        result = self.pool.map_async(gevent.sleep, [0.1] * 1000)
         kill = TimingWrapper(self.pool.kill)
         kill(block=True)
         assert kill.elapsed < 0.5, kill.elapsed
@@ -248,12 +246,34 @@ class TestPoolUnlimit(TestPool):
     size = None
 
 
-class TestJoin(greentest.GenericWaitTestCase):
+class TestJoinSleep(greentest.GenericWaitTestCase):
 
     def wait(self, timeout):
         p = pool.Pool()
         p.spawn(gevent.sleep, 10)
         p.join(timeout=timeout)
+
+
+class TestJoinEmpty(greentest.TestCase):
+    switch_expected = False
+
+    def test(self):
+        p = pool.Pool()
+        p.join()
+
+
+class TestSpawn(greentest.TestCase):
+    switch_expected = True
+
+    def test(self):
+        p = pool.Pool(1)
+        self.assertEqual(len(p), 0)
+        p.spawn(gevent.sleep, 0.1)
+        self.assertEqual(len(p), 1)
+        p.spawn(gevent.sleep, 0.1) # this spawn blocks until the old one finishes
+        self.assertEqual(len(p), 1)
+        gevent.sleep(0.19)
+        self.assertEqual(len(p), 0)
 
 
 if __name__=='__main__':

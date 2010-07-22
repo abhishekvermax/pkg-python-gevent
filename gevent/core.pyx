@@ -43,6 +43,7 @@ __all__ = ['event', 'read_event', 'write_event', 'timer', 'signal', 'active_even
 import sys
 import traceback
 from pprint import pformat
+import weakref
 
 DEF EVENT_INTERNAL_AVAILABLE = False
 
@@ -59,6 +60,14 @@ cdef extern from "Python.h":
     object PyString_FromStringAndSize(char *v, int len)
     object PyString_FromString(char *v)
     int    PyObject_AsCharBuffer(object obj, char **buffer, int *buffer_len)
+
+cdef extern from "frameobject.h":
+    ctypedef struct PyThreadState:
+        void* exc_type
+        void* exc_value
+        void* exc_traceback
+
+    PyThreadState* PyThreadState_GET()
 
 ctypedef void (*event_handler)(int fd, short evtype, void *arg)
 
@@ -93,6 +102,20 @@ cdef extern from "libevent.h":
     int EVLOOP_NONBLOCK
     char* _EVENT_VERSION
 
+    int EV_TIMEOUT
+    int EV_READ
+    int EV_WRITE
+    int EV_SIGNAL
+    int EV_PERSIST
+
+    int EVLIST_TIMEOUT
+    int EVLIST_INSERTED
+    int EVLIST_SIGNAL
+    int EVLIST_ACTIVE
+    int EVLIST_INTERNAL
+    int EVLIST_INIT
+
+
 cdef extern from "string.h":
     char* strerror(int errnum)
 
@@ -123,26 +146,20 @@ cdef extern from "libevent.h":
     event_base* current_base
 
 
-EV_TIMEOUT = 0x01
-EV_READ    = 0x02
-EV_WRITE   = 0x04
-EV_SIGNAL  = 0x08
-EV_PERSIST = 0x10
-
 cdef void __event_handler(int fd, short evtype, void *arg) with gil:
-    cdef event ev = <event>arg
+    cdef event self = <event>arg
     try:
-        assert ev.fd == fd, (ev.fd, fd)
-        ev._callback(ev, evtype)
+        self._callback(self, evtype)
     except:
         traceback.print_exc()
         try:
-            sys.stderr.write('Failed to execute callback for %s\n\n' % (ev, ))
+            sys.stderr.write('Failed to execute callback for %s\n\n' % (self, ))
         except:
-            pass
+            traceback.print_exc()
+        sys.exc_clear()
     finally:
-        if not event_pending(&ev.ev, EV_READ|EV_WRITE|EV_SIGNAL|EV_TIMEOUT, NULL):
-            Py_DECREF(ev)
+        if not event_pending(&self.ev, EV_READ|EV_WRITE|EV_SIGNAL|EV_TIMEOUT, NULL):
+            self._delref()
 
 
 cdef class event:
@@ -155,15 +172,27 @@ cdef class event:
     """
     cdef event_t ev
     cdef object _callback, _arg
+    cdef int _incref # 1 if we already INCREFed this object once (because libevent references it)
 
     def __init__(self, short evtype, int handle, callback, arg=None):
         self._callback = callback
         self._arg = arg
+        self._incref = 0
         cdef void* c_self = <void*>self
         if evtype == 0 and not handle:
             evtimer_set(&self.ev, __event_handler, c_self)
         else:
             event_set(&self.ev, handle, evtype, __event_handler, c_self)
+
+    cdef _addref(self):
+        if self._incref <= 0:
+            Py_INCREF(self)
+            self._incref += 1
+
+    cdef _delref(self):
+        if self._incref > 0:
+            Py_DECREF(self)
+            self._incref -= 1
 
     property callback:
         """User callback that will be called once the event is signalled.
@@ -224,23 +253,49 @@ cdef class event:
         def __get__(self):
             return self.ev.ev_flags
 
-    def add(self, timeout=-1):
+    property flags_str:
+
+        def __get__(self):
+            result = []
+            cdef int flags = self.ev.ev_flags
+            cdef int c_flag
+            for (flag, txt) in ((EVLIST_TIMEOUT, 'TIMEOUT'), (EVLIST_INSERTED, 'INSERTED'), (EVLIST_SIGNAL, 'SIGNAL'),
+                                (EVLIST_ACTIVE, 'ACTIVE'), (EVLIST_INTERNAL, 'INTERNAL'), (EVLIST_INIT, 'INIT')):
+                c_flag = flag
+                if flags & c_flag:
+                    result.append(txt)
+                    c_flag = c_flag ^ 0xffffffff
+                    flags = flags & c_flag
+            if flags:
+                result.append(hex(flags))
+            return '|'.join(result)
+
+    def add(self, timeout=None):
         """Add event to be executed after an optional *timeout* - number of seconds
         after which the event will be executed."""
         cdef timeval tv
         cdef double c_timeout
         cdef int result
-        if not event_pending(&self.ev, EV_READ|EV_WRITE|EV_SIGNAL|EV_TIMEOUT, NULL):
-            Py_INCREF(self)
-        if timeout >= 0.0:
-            c_timeout = <double>timeout
-            tv.tv_sec = <long>c_timeout
-            tv.tv_usec = <unsigned int>((c_timeout - <double>tv.tv_sec) * 1000000.0)
-            result = event_add(&self.ev, &tv)
-        else:
+        errno = 0  # event_add sometime does not set errno
+        if timeout is None:
             result = event_add(&self.ev, NULL)
+        else:
+            c_timeout = <double>timeout
+            if c_timeout < 0.0:
+                #raise ValueError('Expected a non-negative number or None: %r' % (timeout, ))
+                import warnings
+                warnings.warn('Negative timeouts are deprecated. Use None to disable timeout.', DeprecationWarning, stacklevel=2)
+                result = event_add(&self.ev, NULL)
+            else:
+                tv.tv_sec = <long>c_timeout
+                tv.tv_usec = <unsigned int>((c_timeout - <double>tv.tv_sec) * 1000000.0)
+                result = event_add(&self.ev, &tv)
         if result < 0:
-            raise IOError(errno, strerror(errno))
+            if errno:
+                raise IOError(errno, strerror(errno))
+            else:
+                raise IOError("event_add(fileno=%s) returned %s" % (self.fd, result))
+        self._addref()
 
     def cancel(self):
         """Remove event from the event queue."""
@@ -249,7 +304,7 @@ cdef class event:
             result = event_del(&self.ev)
             if result < 0:
                 return result
-            Py_DECREF(self)
+            self._delref()
             return result
 
     def __repr__(self):
@@ -261,8 +316,8 @@ cdef class event:
             events_str = ' %s' % self.events_str
         else:
             events_str = ''
-        return '<%s at %s%s fd=%s%s flags=0x%x cb=%s arg=%s>' % \
-               (type(self).__name__, hex(id(self)), pending, self.fd, events_str, self.flags, self._callback, self._arg)
+        return '<%s at %s%s fd=%s%s flags=%s cb=%s arg=%s>' % \
+               (type(self).__name__, hex(id(self)), pending, self.fd, events_str, self.flags_str, self._callback, self._arg)
 
     def __str__(self):
         if self.pending:
@@ -275,8 +330,8 @@ cdef class event:
             events_str = ''
         cb = str(self._callback).replace('\n', '\n' + ' ' * 8)
         arg = pformat(self._arg, indent=2).replace('\n', '\n' + ' ' * 8)
-        return '%s%s fd=%s%s flags=0x%x\n  cb  = %s\n  arg = %s' % \
-               (type(self).__name__, pending, self.fd, events_str, self.flags, cb, arg)
+        return '%s%s fd=%s%s flags=%s\n  cb  = %s\n  arg = %s' % \
+               (type(self).__name__, pending, self.fd, events_str, self.flags_str, cb, arg)
 
     def __enter__(self):
         return self
@@ -288,41 +343,51 @@ cdef class event:
 cdef class read_event(event):
     """Create a new scheduled event with evtype=EV_READ"""
 
-    def __init__(self, int handle, callback, timeout=-1, arg=None):
-        event.__init__(self, EV_READ, handle, callback, arg)
+    def __init__(self, int handle, callback, timeout=None, arg=None, persist=False):
+        cdef short evtype = EV_READ
+        if persist:
+            evtype = evtype | EV_PERSIST
+        event.__init__(self, evtype, handle, callback, arg)
         self.add(timeout)
 
 
 cdef class write_event(event):
     """Create a new scheduled event with evtype=EV_WRITE"""
 
-    def __init__(self, int handle, callback, timeout=-1, arg=None):
-        event.__init__(self, EV_WRITE, handle, callback, arg)
+    def __init__(self, int handle, callback, timeout=None, arg=None, persist=False):
+        cdef short evtype = EV_WRITE
+        if persist:
+            evtype = evtype | EV_PERSIST
+        event.__init__(self, evtype, handle, callback, arg)
         self.add(timeout)
 
 
 class readwrite_event(event):
     """Create a new scheduled event with evtype=EV_READ|EV_WRITE"""
 
-    def __init__(self, int handle, callback, timeout=-1, arg=None):
-        event.__init__(self, EV_READ|EV_WRITE, handle, callback, arg)
+    def __init__(self, int handle, callback, timeout=None, arg=None, persist=False):
+        cdef short evtype = EV_READ|EV_WRITE
+        if persist:
+            evtype = evtype | EV_PERSIST
+        event.__init__(self, evtype, handle, callback, arg)
         self.add(timeout)
 
 
 cdef void __simple_handler(int fd, short evtype, void *arg) with gil:
-    cdef event ev = <event>arg
+    cdef event self = <event>arg
     try:
-        args, kwargs = ev._arg
-        ev._callback(*args, **kwargs)
+        args, kwargs = self._arg
+        self._callback(*args, **kwargs)
     except:
         traceback.print_exc()
         try:
-            sys.stderr.write('Failed to execute callback for %s\n\n' % (ev, ))
+            sys.stderr.write('Failed to execute callback for %s\n\n' % (self, ))
         except:
-            pass
+            traceback.print_exc()
+        sys.exc_clear()
     finally:
-        if not event_pending(&ev.ev, EV_READ|EV_WRITE|EV_SIGNAL|EV_TIMEOUT, NULL):
-            Py_DECREF(ev)
+        if not event_pending(&self.ev, EV_READ|EV_WRITE|EV_SIGNAL|EV_TIMEOUT, NULL):
+            self._delref()
 
 
 cdef class timer(event):
@@ -342,7 +407,7 @@ cdef class signal(event):
         self._callback = callback
         self._arg = (args, kwargs)
         event_set(&self.ev, signalnum, EV_SIGNAL|EV_PERSIST, __simple_handler, <void*>self)
-        self.add(-1)
+        self.add()
 
 
 cdef class active_event(event):
@@ -352,10 +417,10 @@ cdef class active_event(event):
         self._callback = callback
         self._arg = (args, kwargs)
         evtimer_set(&self.ev, __simple_handler, <void*>self)
-        Py_INCREF(self)
+        self._addref()
         event_active(&self.ev, EV_TIMEOUT, 1)
 
-    def add(self, timeout=-1):
+    def add(self, timeout=None):
         raise NotImplementedError
 
 
@@ -433,10 +498,26 @@ include "evdns.pxi"
 # XXX - make sure event queue is always initialized.
 init()
 
-if get_version() != get_header_version() and get_header_version() is not None:
+if get_version() != get_header_version() and get_header_version() is not None and get_version() != '1.3.99-trunk':
     import warnings
     msg = "libevent version mismatch: system version is %r but this gevent is compiled against %r" % (get_version(), get_header_version())
     warnings.warn(msg, UserWarning, stacklevel=2)
 
 include "evbuffer.pxi"
 include "evhttp.pxi"
+
+def set_exc_info(object typ, object value, object tb):
+    cdef PyThreadState* tstate = PyThreadState_GET()
+    if tstate.exc_type != NULL:
+        Py_DECREF(<object>tstate.exc_type)
+    if tstate.exc_value != NULL:
+        Py_DECREF(<object>tstate.exc_value)
+    if tstate.exc_traceback != NULL:
+        Py_DECREF(<object>tstate.exc_traceback)
+    Py_INCREF(typ)
+    Py_INCREF(value)
+    Py_INCREF(tb)
+    tstate.exc_type = <void*>typ
+    tstate.exc_value = <void *>value
+    tstate.exc_traceback = <void *>tb
+

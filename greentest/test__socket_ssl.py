@@ -1,14 +1,17 @@
 #!/usr/bin/python
 from gevent import monkey; monkey.patch_all()
-
+import sys
 import unittest
 import httplib
 import socket
 
+if not hasattr(socket, 'ssl'):
+    sys.exit(0)
+
 class AmazonHTTPSTests(unittest.TestCase):
 
     def test_amazon_response(self):
-        conn = httplib.HTTPConnection('sdb.amazonaws.com')
+        conn = httplib.HTTPSConnection('sdb.amazonaws.com')
         conn.debuglevel = 1
         conn.request('GET', '/')
         resp = conn.getresponse()

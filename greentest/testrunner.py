@@ -39,12 +39,15 @@ one will be selected if not provided.
 DEFAULT_TIMEOUT = 60
 
 # the number of bytes of output that is recorded; the rest is thrown away
-OUTPUT_LIMIT = 100*1024
+OUTPUT_LIMIT = 15*1024
+
+ignore_tracebacks = ['ExpectedException', 'test_support.TestSkipped', 'test.test_support.TestSkipped']
 
 import sys
 import os
 import glob
 import re
+import traceback
 from unittest import _TextTestResult, defaultTestLoader, TextTestRunner
 import platform
 
@@ -128,7 +131,7 @@ class DatabaseTestResult(_TextTestResult):
 def format_exc_info(exc_info):
     try:
         return '%s: %s' % (exc_info[0].__name__, exc_info[1])
-    except:
+    except Exception:
         return str(exc_info[1]) or str(exc_info[0]) or 'FAILED'
 
 
@@ -146,13 +149,13 @@ class DatabaseTestRunner(TextTestRunner):
 
 def get_changeset():
     try:
-        diffstat = os.popen(r"hg diff 2> /dev/null | diffstat -q").read().strip()
+        diff = os.popen(r"hg diff 2> /dev/null").read().strip()
     except Exception:
-        diffstat = None
+        diff = None
     try:
         changeset = os.popen(r"hg log -r tip 2> /dev/null | grep changeset").readlines()[0]
         changeset = changeset.replace('changeset:', '').strip().replace(':', '_')
-        if diffstat:
+        if diff:
             changeset += '+'
     except Exception:
         changeset = ''
@@ -214,18 +217,7 @@ def run_tests(options, args):
 
 def run_subprocess(arg, options):
     from threading import Timer
-    import subprocess
-
-    if hasattr(subprocess.Popen, 'kill'):
-        Popen = subprocess.Popen
-    else:
-        class Popen(subprocess.Popen):
-            def kill(self):
-                try:
-                    from os import kill
-                    kill(self.pid, 9)
-                except ImportError:
-                    pass
+    from mysubprocess import Popen, PIPE, STDOUT
 
     popen_args = [sys.executable, sys.argv[0], '--record',
                   '--runid', options.runid,
@@ -235,7 +227,7 @@ def run_subprocess(arg, options):
     popen_args += [arg]
     popen_args = [str(x) for x in popen_args]
     if options.capture:
-        popen = Popen(popen_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
+        popen = Popen(popen_args, stdout=PIPE, stderr=STDOUT, shell=False)
     else:
         popen = Popen(popen_args, shell=False)
 
@@ -249,6 +241,7 @@ def run_subprocess(arg, options):
     timeout = Timer(options.timeout, killer)
     timeout.start()
     output = ''
+    output_printed = False
     try:
         try:
             if options.capture:
@@ -259,8 +252,9 @@ def run_subprocess(arg, options):
                     output += data
                     if options.verbosity >= 2:
                         sys.stdout.write(data)
+                        output_printed = True
             retcode.append(popen.wait())
-        except:
+        except Exception:
             popen.kill()
             raise
     finally:
@@ -270,59 +264,72 @@ def run_subprocess(arg, options):
     if module_name.endswith('.py'):
         module_name = module_name[:-3]
     output = output.replace(' (__main__.', ' (' + module_name + '.')
-    return retcode[0], output
+    return retcode[0], output, output_printed
+
+
+def spawn_subprocess(arg, options, base_params):
+    success = False
+    if options.db:
+        module_name = arg
+        if module_name.endswith('.py'):
+            module_name = module_name[:-3]
+        from datetime import datetime
+        params = base_params.copy()
+        params.update({'started_at': datetime.now(),
+                       'test': module_name})
+        row_id = store_record(options.db, 'test', params)
+        params['id'] = row_id
+    retcode, output, output_printed = run_subprocess(arg, options)
+    if len(output) > OUTPUT_LIMIT:
+        output = output[:OUTPUT_LIMIT] + '<AbridgedOutputWarning>'
+    if retcode:
+        if retcode == 1 and 'test_support.TestSkipped' in output:
+            pass
+        else:
+            if not output_printed and options.verbosity >= -1:
+                sys.stdout.write(output)
+            print '%s failed with code %s' % (arg, retcode)
+    elif retcode == 0:
+        if not output_printed and options.verbosity >= 1:
+            sys.stdout.write(output)
+        if options.verbosity >= 0:
+            print '%s passed' % arg
+        success = True
+    else:
+        print '%s timed out' % arg
+    if options.db:
+        params['output'] = output
+        params['retcode'] = retcode
+        store_record(options.db, 'test', params)
+    return success
 
 
 def spawn_subprocesses(options, args):
+    params = {'runid': options.runid,
+              'python': '%s.%s.%s' % sys.version_info[:3],
+              'changeset': get_changeset(),
+              'libevent_version': get_libevent_version(),
+              'libevent_method': get_libevent_method(),
+              'uname': platform.uname()[0],
+              'retcode': 'TIMEOUT'}
+    success = True
     if not args:
         args = glob.glob('test_*.py')
         args.remove('test_support.py')
-    fail = False
-    uname = platform.uname()[0]
     for arg in args:
-        if options.db:
-            module_name = arg
-            if module_name.endswith('.py'):
-                module_name = module_name[:-3]
-            from datetime import datetime
-            params = {'started_at': datetime.now(),
-                      'runid': options.runid,
-                      'test': module_name,
-                      'python': '%s.%s.%s' % sys.version_info[:3],
-                      'changeset': get_changeset(),
-                      'libevent_version': get_libevent_version(),
-                      'libevent_method': get_libevent_method(),
-                      'uname': uname,
-                      'retcode': 'TIMEOUT'}
-            row_id = store_record(options.db, 'test', params)
-            params['id'] = row_id
-        retcode, output = run_subprocess(arg, options)
-        if len(output) > OUTPUT_LIMIT:
-            output = output[:OUTPUT_LIMIT] + '<AbridgedOutputWarning>'
-        if retcode:
-            sys.stdout.write(output)
-            print '%s failed with code %s' % (arg, retcode)
-            fail = True
-        elif retcode == 0:
-            if options.verbosity == 1: # // if verbosity is 2 then output is always printed by run_subprocess
-                sys.stdout.write(output)
-            print '%s passed' % arg
-        else:
-            print '%s timed out' % arg
-            fail = True
-        if options.db:
-            params['output'] = output
-            params['retcode'] = retcode
-            store_record(options.db, 'test', params)
+        try:
+            success = spawn_subprocess(arg, options, params) and success
+        except Exception:
+            traceback.print_exc()
     if options.db:
         try:
             print '-' * 80
             if print_stats(options):
-                fail = True
-        except sqlite3.OperationalError, ex:
-            print ex
+                success = False
+        except sqlite3.OperationalError:
+            traceback.print_exc()
         print 'To view stats again for this run, use %s --stats --runid %s --db %s' % (sys.argv[0], options.runid, options.db)
-    if fail:
+    if not success:
         sys.exit(1)
 
 
@@ -350,7 +357,7 @@ def get_failed_testcases(cursor, runid):
 
 _warning_re = re.compile('\w*warning', re.I)
 _error_re = re.compile(r'(?P<prefix>\s*)Traceback \(most recent call last\):' +
-                       r'(\n(?P=prefix)\s+.*)+\n(?P=prefix)(?P<error>[\w\.]+)')
+                       r'(\n(?P=prefix)[ \t]+[^\n]*)+\n(?P=prefix)(?P<error>[\w\.]+)')
 
 
 def get_warnings(output):
@@ -358,7 +365,10 @@ def get_warnings(output):
     >>> get_warnings('hello DeprecationWarning warning: bla DeprecationWarning')
     ['DeprecationWarning', 'warning', 'DeprecationWarning']
     """
-    return _warning_re.findall(output)
+    if len(output) <= OUTPUT_LIMIT:
+        return _warning_re.findall(output)
+    else:
+        return _warning_re.findall(output[:OUTPUT_LIMIT]) + ['AbridgedOutputWarning']
 
 
 def get_exceptions(output):
@@ -371,6 +381,7 @@ def get_exceptions(output):
     """
     return [x.group('error') for x in _error_re.finditer(output)]
 
+
 def get_warning_stats(output):
     counter = {}
     for warning in get_warnings(output):
@@ -381,18 +392,32 @@ def get_warning_stats(output):
     result = []
     for name, count in items:
         if count == 1:
-            result.append('1 %s' % name)
+            result.append(name)
         else:
             result.append('%s %ss' % (count, name))
     return result
 
 
-def get_traceback_stats(output):
+def get_ignored_tracebacks(test):
+    if os.path.exists(test + '.py'):
+        data = open(test + '.py').read()
+        m = re.search('Ignore tracebacks: (.*)', data)
+        if m is not None:
+            return m.group(1).split()
+    return []
+
+
+def get_traceback_stats(output, test):
+    ignored = get_ignored_tracebacks(test) or ignore_tracebacks
     counter = {}
     traceback_count = output.lower().count('Traceback (most recent call last)')
-    for warning in get_exceptions(output):
-        counter.setdefault(warning, 0)
-        counter[warning] += 1
+    ignored_list = []
+    for error in get_exceptions(output):
+        if error in ignored:
+            ignored_list.append(error)
+        else:
+            counter.setdefault(error, 0)
+            counter[error] += 1
         traceback_count -= 1
     items = counter.items()
     items.sort(key=lambda (a, b): -b)
@@ -404,13 +429,16 @@ def get_traceback_stats(output):
             result.append('1 %s' % name)
         else:
             result.append('%s %ss' % (count, name))
-    return result
+    return result, ignored_list
 
 
-def get_info(output):
+def get_info(output, test):
     output = output[:OUTPUT_LIMIT*2]
-    result = get_traceback_stats(output) + get_warning_stats(output)
-    return ', '.join(result)
+    traceback_stats, ignored_list = get_traceback_stats(output, test)
+    warning_stats = get_warning_stats(output)
+    result = traceback_stats + warning_stats
+    skipped = not warning_stats and not traceback_stats and ignored_list in [['test_support.TestSkipped'], ['test.test_support.TestSkipped']]
+    return ', '.join(result), skipped
 
 
 def print_stats(options):
@@ -423,7 +451,7 @@ def print_stats(options):
     failed, errors = get_failed_testcases(cursor, options.runid)
     timedout = get_testcases(cursor, options.runid, 'TIMEOUT')
     for test, output, retcode in cursor.execute('select test, output, retcode from test where runid=?', (options.runid, )):
-        info = get_info(output or '')
+        info, skipped = get_info(output or '', test)
         if info:
             print '%s: %s' % (test, info)
         if retcode == 'TIMEOUT':
@@ -438,8 +466,9 @@ def print_stats(options):
                 if testcase.startswith(test + '.'):
                     break
             else:
-                failed.append(test)
-                total += 1
+                if not skipped:
+                    failed.append(test)
+                    total += 1
     if failed:
         failed.sort()
         print 'FAILURES: '

@@ -8,7 +8,6 @@ This module implements cooperative SSL socket wrappers.
 On Python 2.6 and older it uses Python's native :mod:`ssl` module. On Python 2.5 and 2.4
 it requires `ssl package`_ to be installed.
 
-.. __: http://docs.python.org/library/ssl.html
 .. _`ssl package`: http://pypi.python.org/pypi/ssl
 """
 
@@ -339,6 +338,7 @@ def wrap_socket(sock, keyfile=None, certfile=None,
                 ssl_version=PROTOCOL_SSLv23, ca_certs=None,
                 do_handshake_on_connect=True,
                 suppress_ragged_eofs=True):
+    """Create a new :class:`SSLSocket` instance."""
     return SSLSocket(sock, keyfile=keyfile, certfile=certfile,
                      server_side=server_side, cert_reqs=cert_reqs,
                      ssl_version=ssl_version, ca_certs=ca_certs,

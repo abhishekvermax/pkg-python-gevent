@@ -23,6 +23,7 @@ import greentest
 import unittest
 import time
 import re
+import sys
 import gevent
 from gevent import core
 from gevent import socket
@@ -71,7 +72,7 @@ class TestExceptionInMainloop(greentest.TestCase):
         assert delay >= DELAY*0.9, 'sleep returned after %s seconds (was scheduled for %s)' % (delay, DELAY)
 
         def fail():
-            1/0
+            raise greentest.ExpectedException('TestExceptionInMainloop.test_sleep/fail')
 
         core.timer(0, fail)
 
@@ -84,7 +85,9 @@ class TestExceptionInMainloop(greentest.TestCase):
 
 class TestShutdown(unittest.TestCase):
 
-    def _shutdown(self, seconds=0, fuzzy=0.01):
+    def _shutdown(self, seconds=0, fuzzy=None):
+        if fuzzy is None:
+            fuzzy = max(0.05, seconds / 2.)
         start = time.time()
         gevent.hub.shutdown()
         delta = time.time() - start
@@ -94,11 +97,11 @@ class TestShutdown(unittest.TestCase):
         assert 'hub' in gevent.hub._threadlocal.__dict__
 
     def assert_no_hub(self):
-        assert 'hub' not in gevent.hub._threadlocal.__dict__
+        assert 'hub' not in gevent.hub._threadlocal.__dict__, gevent.hub._threadlocal.__dict__
 
     def test(self):
         # make sure Hub is started. For the test case when hub is not started, see test_hub_shutdown.py
-
+        gevent.sleep(0)
         assert not gevent.hub.get_hub().dead
         self._shutdown()
         self.assert_no_hub()
@@ -125,25 +128,44 @@ class TestSleep(greentest.GenericWaitTestCase):
     def wait(self, timeout):
         gevent.sleep(timeout)
 
+    def test_negative(self):
+        self.switch_expected = False
+        self.assertRaises(IOError, gevent.sleep, -1)
+        if sys.platform != 'win32':
+            from time import sleep as real_sleep
+            try:
+                real_sleep(-0.1)
+            except IOError, real_ex:
+                pass
+        else:
+            # XXX real_sleep(-0.1) hangs on win32
+            real_ex = "[Errno 22] Invalid argument"
+        try:
+            gevent.sleep(-0.1)
+        except IOError, gevent_ex:
+            pass
+        self.assertEqual(str(gevent_ex), str(real_ex))
+
 
 class Expected(Exception):
     pass
 
 
-class TestSignal(greentest.TestCase):
+if hasattr(signal, 'SIGALRM'):
+    class TestSignal(greentest.TestCase):
 
-    __timeout__ = 2
+        __timeout__ = 2
 
-    def test_exception_goes_to_MAIN(self):
-        def handler():
-            raise Expected('TestSignal')
-        gevent.signal(signal.SIGALRM, handler)
-        signal.alarm(1)
-        try:
-            gevent.sleep(1.1)
-            raise AssertionError('must raise Expected')
-        except Expected, ex:
-            assert str(ex) == 'TestSignal', ex
+        def test_exception_goes_to_MAIN(self):
+            def handler():
+                raise Expected('TestSignal')
+            gevent.signal(signal.SIGALRM, handler)
+            signal.alarm(1)
+            try:
+                gevent.spawn(gevent.sleep, 2).join()
+                raise AssertionError('must raise Expected')
+            except Expected, ex:
+                assert str(ex) == 'TestSignal', ex
 
 
 class TestWaiter(greentest.GenericWaitTestCase):

@@ -19,13 +19,19 @@ __all__ = ['getcurrent',
            'Waiter']
 
 
+def __import_py_magic_greenlet():
+    try:
+        from py.magic import greenlet
+        return greenlet
+    except ImportError:
+        pass
+
 try:
     greenlet = __import__('greenlet').greenlet
 except ImportError:
-    try:
-        from py.magic import greenlet
-    except ImportError:
-        raise ImportError('gevent requires greenlet: http://pypi.python.org/pypi/greenlet/')
+    greenlet = __import_py_magic_greenlet()
+    if greenlet is None:
+        raise
 
 getcurrent = greenlet.getcurrent
 GreenletExit = greenlet.GreenletExit
@@ -66,6 +72,8 @@ def sleep(seconds=0):
     expressing a cooperative yield.
     """
     unique_mark = object()
+    if not seconds >= 0:
+        raise IOError(22, 'Invalid argument')
     timer = core.timer(seconds, getcurrent().switch, unique_mark)
     try:
         switch_result = get_hub().switch()
@@ -142,13 +150,18 @@ class Hub(greenlet):
     def switch(self):
         cur = getcurrent()
         assert cur is not self, 'Cannot switch to MAINLOOP from MAINLOOP'
-        switch_out = getattr(cur, 'switch_out', None)
-        if switch_out is not None:
-            try:
-                switch_out()
-            except:
-                traceback.print_exc()
-        return greenlet.switch(self)
+        exc_info = sys.exc_info()
+        try:
+            sys.exc_clear()
+            switch_out = getattr(cur, 'switch_out', None)
+            if switch_out is not None:
+                try:
+                    switch_out()
+                except:
+                    traceback.print_exc()
+            return greenlet.switch(self)
+        finally:
+            core.set_exc_info(*exc_info)
 
     def run(self):
         global _threadlocal
@@ -169,6 +182,7 @@ class Hub(greenlet):
                     sys.stderr.write('Restarting gevent.core.dispatch() after an error [%s]: %s\n' % (loop_count, ex))
                     continue
                 raise DispatchExit(result)
+                # this function must never return, as it will cause switch() in MAIN to return an unexpected value
         finally:
             if self.keyboard_interrupt_signal is not None:
                 self.keyboard_interrupt_signal.cancel()
@@ -183,6 +197,9 @@ class Hub(greenlet):
             self.keyboard_interrupt_signal = None
         core.dns_shutdown()
         if not self or self.dead:
+            if _threadlocal.__dict__.get('hub') is self:
+                _threadlocal.__dict__.pop('hub')
+            self.run = None
             return
         try:
             self.switch()
@@ -207,7 +224,7 @@ class Waiter(object):
     * switching will occur only if the waiting greenlet is executing :meth:`get` method currently;
     * any error raised in the greenlet is handled inside :meth:`switch` and :meth:`throw`
     * if :meth:`switch`/:meth:`throw` is called before the receiver calls :meth:`get`, then :class:`Waiter`
-      will store the value/exception. The following :meth:`get`will return the value/raise the exception.
+      will store the value/exception. The following :meth:`get` will return the value/raise the exception.
 
     The :meth:`switch` and :meth:`throw` methods must only be called from the :class:`Hub` greenlet.
     The :meth:`get` method must be called from a greenlet other than :class:`Hub`.
@@ -229,7 +246,7 @@ class Waiter(object):
     .. warning::
 
         This a limited and dangerous way to communicate between greenlets. It can easily
-        left a greenlet unscheduled forever if used incorrectly. Consider using safer
+        leave a greenlet unscheduled forever if used incorrectly. Consider using safer
         :class:`Event`/:class:`AsyncResult`/:class:`Queue` classes.
     """
 

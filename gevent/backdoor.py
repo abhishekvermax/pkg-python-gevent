@@ -3,6 +3,7 @@
 # Copyright (c) 2005-2006, Bob Ippolito
 # Copyright (c) 2007, Linden Research, Inc.
 # Copyright (c) 2008, Donovan Preston
+# Copyright (c) 2009-2010, Denis Bilenko
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -27,6 +28,7 @@ from code import InteractiveConsole
 
 from gevent import socket
 from gevent.greenlet import Greenlet
+from gevent.server import StreamServer
 
 try:
     sys.ps1
@@ -40,11 +42,11 @@ except AttributeError:
 
 class SocketConsole(Greenlet):
 
-    def __init__(self, desc, locals):
+    def __init__(self, locals, conn):
         Greenlet.__init__(self)
         self.locals = locals
         # mangle the socket
-        self.desc = desc
+        desc = self.desc = _fileobject(conn)
         readline = desc.readline
         self.old = {}
         self.fixups = {
@@ -81,38 +83,25 @@ class SocketConsole(Greenlet):
 
     def _run(self):
         try:
-            console = InteractiveConsole(self.locals)
-            console.interact()
+            try:
+                console = InteractiveConsole(self.locals)
+                console.interact()
+            except SystemExit: # raised by quit()
+                pass
         finally:
             self.switch_out()
             self.finalize()
 
 
-class BackdoorServer(Greenlet):
+class BackdoorServer(StreamServer):
 
-    def __init__(self, address, locals=None):
-        Greenlet.__init__(self)
-        if isinstance(address, socket.socket):
-            self.socket = address
-        else:
-            self.socket = socket.tcp_listener(address)
+    def __init__(self, listener, locals=None, **server_args):
+        StreamServer.__init__(self, listener, spawn=None, **server_args)
         self.locals = locals
+        # QQQ passing pool instance as 'spawn' is not possible; should it be fixed?
 
-    def __str__(self):
-        return '<BackdoorServer on %s>' % (self.socket, )
-
-    def _run(self):
-        while True:
-            (conn, address) = self.socket.accept()
-            print 'accepted connection from %s' % (address, )
-            fileobj = _fileobject(conn)
-            SocketConsole.spawn(fileobj, self.locals)
-
-
-def backdoor_server(server, locals=None):
-    import warnings
-    warnings.warn("gevent.backdoor_server is deprecated; use BackdoorServer", DeprecationWarning, stacklevel=2)
-    BackdoorServer.spawn(server, locals).join()
+    def handle(self, conn, address):
+        SocketConsole.spawn(self.locals, conn)
 
 
 class _fileobject(socket._fileobject):
@@ -125,10 +114,5 @@ if __name__ == '__main__':
     if not sys.argv[1:]:
         print 'USAGE: %s PORT' % sys.argv[0]
     else:
-        server = BackdoorServer.spawn(('127.0.0.1', int(sys.argv[1])))
-        print server
-        try:
-            server.join()
-        except KeyboardInterrupt:
-            pass
+        BackdoorServer(('127.0.0.1', int(sys.argv[1]))).serve_forever()
 
