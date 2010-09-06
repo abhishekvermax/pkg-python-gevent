@@ -7,6 +7,15 @@ python-gevent (0.13.0-1) unstable; urgency=low
 
  -- Örjan Persson <orange@fobie.net>  Thu, 22 Jul 2010 12:09:58 +0200
 
+python-gevent (0.12.2-7) unstable; urgency=low
+
+  * Fixed a build problem with sphinx generation when no internet connection
+    where available. Thanks to Jakub Wilk for reporting the problem and
+    John Sullivan for patch (Closes: #584380).
+  * Fixed documentation reference problems. Thanks to John Sullivan for patch.
+
+ -- Örjan Persson <orange@fobie.net>  Mon, 06 Sep 2010 20:39:02 +0200
+
 python-gevent (0.12.2-6) unstable; urgency=low
 
   * Added missing set_exc_info function. Thanks to Chris Lamb for the
