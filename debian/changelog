@@ -1,3 +1,9 @@
+python-gevent (0.13.0-2) unstable; urgency=low
+
+  * Include changes from squeeze version (0.12.2-7).
+
+ -- Örjan Persson <orange@fobie.net>  Fri, 10 Sep 2010 09:59:05 +0200
+
 python-gevent (0.13.0-1) unstable; urgency=low
 
   * New upstream version (Closes: #589268).
