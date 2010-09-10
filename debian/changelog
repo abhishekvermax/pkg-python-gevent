@@ -1,4 +1,4 @@
-python-gevent (0.12.2-7) unstable; urgency=low
+python-gevent (0.12.2-7) testing-proposed-updates; urgency=low
 
   * Fixed a build problem with sphinx generation when no internet connection
     where available. Thanks to Jakub Wilk for reporting the problem and
