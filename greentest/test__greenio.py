@@ -21,8 +21,11 @@ from greentest import TestCase, main
 import gevent
 from gevent import socket
 
+
 class TestGreenIo(TestCase):
+
     def test_close_with_makefile(self):
+
         def accept_close_early(listener):
             # verify that the makefile and the socket are truly independent
             # by closing the socket prior to using the made file
@@ -65,16 +68,16 @@ class TestGreenIo(TestCase):
         server = socket.tcp_listener(('0.0.0.0', 0))
         server_greenlet = gevent.spawn(accept_close_early, server)
         did_it_work(server)
-        server_greenlet.kill(block=True)
+        server_greenlet.kill()
 
         server = socket.tcp_listener(('0.0.0.0', 0))
         server_greenlet = gevent.spawn(accept_close_late, server)
         did_it_work(server)
-        server_greenlet.kill(block=True)
-
+        server_greenlet.kill()
 
     def test_del_closes_socket(self):
         timer = gevent.Timeout.start_new(0.5)
+
         def accept_once(listener):
             # delete/overwrite the original conn
             # object, only keeping the file object around
@@ -88,8 +91,9 @@ class TestGreenIo(TestCase):
                 assert r is None, r
             finally:
                 listener.close()
+
         server = socket.tcp_listener(('0.0.0.0', 0))
-        killer = gevent.spawn(accept_once, server)
+        gevent.spawn(accept_once, server)
         client = socket.create_connection(('127.0.0.1', server.getsockname()[1]))
         fd = client.makefile()
         client.close()

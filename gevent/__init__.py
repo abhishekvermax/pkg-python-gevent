@@ -6,8 +6,9 @@ to provide a high-level synchronous API on top of libevent event loop.
 See http://www.gevent.org/ for the documentation.
 """
 
-version_info = (0, 13, 0)
-__version__ = '0.13.0'
+version_info = (0, 13, 6)
+__version__ = '0.13.6'
+__changeset__ = '1734:6c834b912c36'
 
 __all__ = ['Greenlet',
            'GreenletExit',
@@ -33,7 +34,7 @@ __all__ = ['Greenlet',
 
 import sys
 if sys.platform == 'win32':
-    __import__('socket') # trigger WSAStartup call
+    __import__('socket')  # trigger WSAStartup call
 del sys
 
 

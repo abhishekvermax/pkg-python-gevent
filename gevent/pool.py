@@ -5,8 +5,8 @@ The :class:`Group` class in this module abstracts a group of running greenlets.
 When a greenlet dies, it's automatically removed from the group.
 
 The :class:`Pool` which a subclass of :class:`Group` provides a way to limit
-concurrency: its :meth:`spawn <Pool.spawn>` blocks if the number of greenlets
-in the pool would exceed the limit.
+concurrency: its :meth:`spawn <Pool.spawn>` method blocks if the number of
+greenlets in the pool has already reached the limit, until there is a free slot.
 """
 
 from gevent.hub import GreenletExit, getcurrent
@@ -26,7 +26,7 @@ class Group(object):
     greenlet_class = Greenlet
 
     def __init__(self, *args):
-        assert len(args)<=1, args
+        assert len(args) <= 1, args
         self.greenlets = set(*args)
         if args:
             for greenlet in args[0]:
@@ -40,7 +40,7 @@ class Group(object):
         try:
             classname = self.__class__.__name__
         except AttributeError:
-            classname = 'Group' # XXX check if 2.4 really uses this line
+            classname = 'Group'  # XXX check if 2.4 really uses this line
         return '<%s at %s %s>' % (classname, hex(id(self)), self.greenlets)
 
     def __len__(self):
@@ -97,7 +97,7 @@ class Group(object):
             greenlets = self.greenlets.copy()
             self._empty_event.wait(timeout=timeout)
             for greenlet in greenlets:
-                if not greenlet.successful():
+                if greenlet.exception is not None:
                     raise greenlet.exception
         else:
             self._empty_event.wait(timeout=timeout)
@@ -183,18 +183,15 @@ class Group(object):
 
     def imap(self, func, iterable):
         """An equivalent of itertools.imap()
-        
+
         **TODO**: Fix this.
         """
         return iter(self.map(func, iterable))
 
     def imap_unordered(self, func, iterable):
         """The same as imap() except that the ordering of the results from the
-        returned iterator should be considered arbitrary.
-        
-        **TODO**: Fix this.
-        """
-        return iter(self.map(func, iterable))
+        returned iterator should be considered in arbitrary order."""
+        return IMapUnordered.spawn(self.spawn, func, iterable)
 
     def full(self):
         return False
@@ -203,13 +200,49 @@ class Group(object):
         pass
 
 
-GreenletSet = Group # the old name; will be deprecated in the future
+class IMapUnordered(Greenlet):
+
+    def __init__(self, spawn, func, iterable):
+        from gevent.queue import Queue
+        Greenlet.__init__(self)
+        self.spawn = spawn
+        self.func = func
+        self.iterable = iterable
+        self.queue = Queue()
+        self.count = 0
+
+    def __iter__(self):
+        return self.queue
+
+    def _run(self):
+        try:
+            func = self.func
+            for item in self.iterable:
+                self.count += 1
+                self.spawn(func, item).rawlink(self._on_result)
+        finally:
+            self.__dict__.pop('spawn', None)
+            self.__dict__.pop('func', None)
+            self.__dict__.pop('iterable', None)
+
+    def _on_result(self, greenlet):
+        self.count -= 1
+        if greenlet.successful():
+            self.queue.put(greenlet.value)
+        if self.ready() and self.count <= 0:
+            self.queue.put(StopIteration)
+
+
+def GreenletSet(*args, **kwargs):
+    import warnings
+    warnings.warn("gevent.pool.GreenletSet was renamed to gevent.pool.Group since version 0.13.0", DeprecationWarning, stacklevel=2)
+    return Group(*args, **kwargs)
 
 
 class Pool(Group):
 
     def __init__(self, size=None, greenlet_class=None):
-        if size is not None and size < 0:
+        if size is not None and size < 1:
             raise ValueError('Invalid size for pool (positive integer or None required): %r' % (size, ))
         Group.__init__(self)
         self.size = size
@@ -315,4 +348,3 @@ class pass_value(object):
     def __getattr__(self, item):
         assert item != 'callback'
         return getattr(self.callback, item)
-

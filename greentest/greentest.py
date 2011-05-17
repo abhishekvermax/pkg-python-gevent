@@ -22,19 +22,18 @@
 # package is named greentest, not test, so it won't be confused with test in stdlib
 import sys
 import unittest
+from unittest import TestCase as BaseTestCase
 import time
 import traceback
 import re
-
+import os
+from os.path import basename, splitext
 import gevent
-
-disabled_marker = '-*-*-*-*-*- disabled -*-*-*-*-*-'
-def exit_disabled():
-    sys.exit(disabled_marker)
-
-def exit_unless_25():
-    if sys.version_info[:2] < (2, 5):
-        exit_disabled()
+from patched_tests_setup import get_switch_expected
+try:
+    from functools import wraps
+except ImportError:
+    wraps = lambda *args: (lambda x: x)
 
 VERBOSE = sys.argv.count('-v') > 1
 
@@ -44,23 +43,73 @@ if '--debug-greentest' in sys.argv:
 else:
     DEBUG = False
 
+gettotalrefcount = getattr(sys, 'gettotalrefcount', None)
 
-class TestCase(unittest.TestCase):
+
+def wrap(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        import gc
+        gc.disable()
+        gc.collect()
+        deltas = []
+        d = None
+        try:
+            for _ in xrange(4):
+                d = gettotalrefcount()
+                method(self, *args, **kwargs)
+                if hasattr(self, 'cleanup'):
+                    self.cleanup()
+                if 'urlparse' in sys.modules:
+                    sys.modules['urlparse'].clear_cache()
+                d = gettotalrefcount() - d
+                deltas.append(d)
+                if deltas[-1] == 0:
+                    break
+            else:
+                raise AssertionError('refcount increased by %r' % (deltas, ))
+        finally:
+            gc.collect()
+            gc.enable()
+    return wrapped
+
+
+class CheckRefcountMetaClass(type):
+    def __new__(meta, classname, bases, classDict):
+        if classDict.get('check_totalrefcount', True):
+            for key, value in classDict.items():
+                if (key.startswith('test_') or key == 'test') and callable(value):
+                    classDict.pop(key)
+                    classDict[key] = wrap(value)
+        return type.__new__(meta, classname, bases, classDict)
+
+
+class TestCase0(BaseTestCase):
 
     __timeout__ = 1
-    switch_expected = True
+    switch_expected = 'default'
     _switch_count = None
 
+    def __init__(self, *args, **kwargs):
+        BaseTestCase.__init__(self, *args, **kwargs)
+        self._timer = None
+        self._hub = gevent.hub.get_hub()
+        self._switch_count = None
+
+    def run(self, *args, **kwargs):
+        if self.switch_expected == 'default':
+            self.switch_expected = get_switch_expected(self.fullname)
+        return BaseTestCase.run(self, *args, **kwargs)
+
     def setUp(self):
-        gevent.sleep(0) # switch at least once to setup signal handlers
-        if hasattr(gevent.core, '_event_count'):
-            self._event_count = (gevent.core._event_count(), gevent.core._event_count_active())
-        hub = gevent.hub.get_hub()
-        if hasattr(hub, 'switch_count'):
-            self._switch_count = hub.switch_count
+        gevent.sleep(0)  # switch at least once to setup signal handlers
+        if hasattr(self._hub, 'switch_count'):
+            self._switch_count = self._hub.switch_count
         self._timer = gevent.Timeout.start_new(self.__timeout__, RuntimeError('test is taking too long'))
 
     def tearDown(self):
+        if hasattr(self, 'cleanup'):
+            self.cleanup()
         try:
             if not hasattr(self, 'stderr'):
                 self.unhook_stderr()
@@ -68,28 +117,21 @@ class TestCase(unittest.TestCase):
                 sys.__stderr__.write(self.stderr)
         except:
             traceback.print_exc()
-        if hasattr(self, '_timer'):
+        if getattr(self, '_timer', None) is not None:
             self._timer.cancel()
-            hub = gevent.hub.get_hub()
-            if self._switch_count is not None and hasattr(hub, 'switch_count'):
+            self._timer = None
+            if self._switch_count is not None and hasattr(self._hub, 'switch_count'):
                 msg = ''
-                if hub.switch_count < self._switch_count:
+                if self._hub.switch_count < self._switch_count:
                     msg = 'hub.switch_count decreased?\n'
-                elif hub.switch_count == self._switch_count:
+                elif self._hub.switch_count == self._switch_count:
                     if self.switch_expected:
                         msg = '%s.%s did not switch\n' % (type(self).__name__, self.testname)
-                elif hub.switch_count > self._switch_count:
+                elif self._hub.switch_count > self._switch_count:
                     if not self.switch_expected:
                         msg = '%s.%s switched but expected not to\n' % (type(self).__name__, self.testname)
                 if msg:
                     print >> sys.stderr, 'WARNING: ' + msg
-
-            if hasattr(gevent.core, '_event_count'):
-                event_count = (gevent.core._event_count(), gevent.core._event_count_active())
-                if event_count > self._event_count:
-                    args = (type(self).__name__, self.testname, self._event_count, event_count)
-                    sys.stderr.write('WARNING: %s.%s event count was %s, now %s\n' % args)
-                    gevent.sleep(0.1)
         else:
             sys.stderr.write('WARNING: %s.setUp does not call base class setUp\n' % (type(self).__name__, ))
 
@@ -100,6 +142,18 @@ class TestCase(unittest.TestCase):
     @property
     def testcasename(self):
         return self.__class__.__name__ + '.' + self.testname
+
+    @property
+    def modulename(self):
+        test_method = getattr(self, self.testname)
+        try:
+            return test_method.__func__.func_code.co_filename
+        except AttributeError:
+            return test_method.im_func.func_code.co_filename
+
+    @property
+    def fullname(self):
+        return splitext(basename(self.modulename))[0] + '.' + self.testcasename
 
     def hook_stderr(self):
         if VERBOSE:
@@ -162,7 +216,7 @@ class TestCase(unittest.TestCase):
 
     def extract_re(self, regex, **kwargs):
         assert self.stderr is not None
-        m = re.search(regex, self.stderr, re.DOTALL|re.M)
+        m = re.search(regex, self.stderr, re.DOTALL | re.M)
         if m is None:
             raise AssertionError('%r did not match:\n%r' % (regex, self.stderr))
         for key, expected_value in kwargs.items():
@@ -176,12 +230,17 @@ class TestCase(unittest.TestCase):
         if DEBUG:
             ate = '\n#ATE#: ' + self.stderr[m.start(0):m.end(0)].replace('\n', '\n#ATE#: ') + '\n'
             sys.__stderr__.write(ate)
-        self.stderr = self.stderr[:m.start(0)] + self.stderr[m.end(0)+1:]
+        self.stderr = self.stderr[:m.start(0)] + self.stderr[m.end(0) + 1:]
+
+
+class TestCase(TestCase0):
+    if gettotalrefcount is not None:
+        __metaclass__ = CheckRefcountMetaClass
 
 
 main = unittest.main
-
 _original_Hub = gevent.hub.Hub
+
 
 class CountingHub(_original_Hub):
 
@@ -195,14 +254,16 @@ gevent.hub.Hub = CountingHub
 
 
 def test_outer_timeout_is_not_lost(self):
-    timeout = gevent.Timeout.start_new(0.01)
+    timeout = gevent.Timeout.start_new(0.001)
     try:
-        self.wait(timeout=0.02)
-    except gevent.Timeout, ex:
-        assert ex is timeout, (ex, timeout)
-    else:
-        raise AssertionError('must raise Timeout')
-    gevent.sleep(0.02)
+        try:
+            result = self.wait(timeout=1)
+        except gevent.Timeout, ex:
+            assert ex is timeout, (ex, timeout)
+        else:
+            raise AssertionError('must raise Timeout (returned %r)' % (result, ))
+    finally:
+        timeout.cancel()
 
 
 class GenericWaitTestCase(TestCase):
@@ -217,7 +278,7 @@ class GenericWaitTestCase(TestCase):
         result = self.wait(timeout=0.01)
         # join and wait simply returns after timeout expires
         delay = time.time() - start
-        assert 0.01 - 0.001 <= delay < 0.01 + 0.01 + 0.1, delay
+        assert 0.01 - 0.001 <= delay < 0.01 + 0.01, delay
         assert result is None, repr(result)
 
 
@@ -225,6 +286,9 @@ class GenericGetTestCase(TestCase):
 
     def wait(self, timeout):
         raise NotImplementedError('override me in subclass')
+
+    def cleanup(self):
+        pass
 
     test_outer_timeout_is_not_lost = test_outer_timeout_is_not_lost
 
@@ -234,6 +298,7 @@ class GenericGetTestCase(TestCase):
         # get raises Timeout after timeout expired
         delay = time.time() - start
         assert 0.01 - 0.001 <= delay < 0.01 + 0.01 + 0.1, delay
+        self.cleanup()
 
     def test_raises_timeout_Timeout(self):
         start = time.time()
@@ -244,6 +309,7 @@ class GenericGetTestCase(TestCase):
             assert ex is timeout, (ex, timeout)
         delay = time.time() - start
         assert 0.01 - 0.001 <= delay < 0.01 + 0.01 + 0.1, delay
+        self.cleanup()
 
     def test_raises_timeout_Timeout_exc_customized(self):
         start = time.time()
@@ -255,7 +321,34 @@ class GenericGetTestCase(TestCase):
             assert ex is error, (ex, error)
         delay = time.time() - start
         assert 0.01 - 0.001 <= delay < 0.01 + 0.01 + 0.1, delay
+        self.cleanup()
 
 
 class ExpectedException(Exception):
     """An exception whose traceback should be ignored"""
+
+
+def walk_modules(basedir=None, modpath=None, include_so=False):
+    if basedir is None:
+        basedir = os.path.dirname(gevent.__file__)
+        if modpath is None:
+            modpath = 'gevent.'
+    else:
+        if modpath is None:
+            modpath = ''
+    for fn in sorted(os.listdir(basedir)):
+        path = os.path.join(basedir, fn)
+        if os.path.isdir(path):
+            pkg_init = os.path.join(path, '__init__.py')
+            if os.path.exists(pkg_init):
+                yield pkg_init, modpath + fn
+                for p, m in walk_modules(path, modpath + fn + "."):
+                    yield p, m
+            continue
+        if fn.endswith('.py') and fn not in ['__init__.py', 'core.py']:
+            yield path, modpath + fn[:-3]
+        elif include_so and fn.endswith('.so'):
+            if fn.endswith('_d.so'):
+                yield path, modpath + fn[:-5]
+            else:
+                yield path, modpath + fn[:-3]

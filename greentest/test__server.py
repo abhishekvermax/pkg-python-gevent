@@ -64,10 +64,10 @@ class TestCase(greentest.TestCase):
 
     __timeout__ = 10
 
-    def tearDown(self):
-        greentest.TestCase.tearDown(self)
-        if hasattr(self, 'server'):
+    def cleanup(self):
+        if getattr(self, 'server', None) is not None:
             self.server.stop()
+            self.server = None
 
     def get_listener(self):
         sock = socket.socket()
@@ -154,12 +154,15 @@ class TestCase(greentest.TestCase):
         return self.server.socket
 
     def _test_invalid_callback(self):
-        self.hook_stderr()
-        self.server = self.ServerClass(('127.0.0.1', 0), lambda : None)
-        self.server.start()
-        self.assert500()
-        self.assert_stderr_traceback('TypeError')
-        self.assert_stderr(self.invalid_callback_message)
+        try:
+            self.hook_stderr()
+            self.server = self.ServerClass(('127.0.0.1', 0), lambda: None)
+            self.server.start()
+            self.assert500()
+            self.assert_stderr_traceback('TypeError')
+            self.assert_stderr(self.invalid_callback_message)
+        finally:
+            self.server.stop()
 
     def ServerClass(self, *args, **kwargs):
         kwargs.setdefault('spawn', self.get_spawn())
@@ -189,7 +192,7 @@ class TestDefaultSpawn(TestCase):
             self.report_netstat('after start_accepting')
             self.assertRequestSucceeded()
         else:
-            self.assertRaises(Exception, self.server.start) # XXX which exception exactly?
+            self.assertRaises(Exception, self.server.start)  # XXX which exception exactly?
         self.stop_server()
         self.report_netstat('after stop')
 
@@ -202,8 +205,14 @@ class TestDefaultSpawn(TestCase):
         self.assertConnectionRefused()
         self._test_server_start_stop(restartable=False)
 
+    def test_subclass_just_create(self):
+        self.server = self.ServerSubClass(self.get_listener())
+        self.assertNotAccepted()
+
     def test_subclass_with_socket(self):
         self.server = self.ServerSubClass(self.get_listener())
+        # the connection won't be refused, because there exists a listening socket, but it won't be handled also
+        self.assertNotAccepted()
         self.server.reuse_addr = 1
         self._test_server_start_stop(restartable=True)
 
@@ -224,7 +233,7 @@ class TestDefaultSpawn(TestCase):
             assert not self.server.started
             self.assertConnectionRefused()
         finally:
-            g.kill(block=True)
+            g.kill()
 
     def test_serve_forever(self):
         self.server = self.ServerSubClass(('127.0.0.1', 0))
@@ -303,6 +312,7 @@ class TestPoolSpawn(TestDefaultSpawn):
         self.init_server()
         short_request = self.send_request('/short')
         long_request = self.send_request('/long')
+        # keep long_request in scope, otherwise the connection will be closed
         gevent.sleep(0.01)
         self.assertPoolFull()
         self.assertPoolFull()
@@ -334,7 +344,6 @@ class TestNoneSpawn(TestCase):
         self.assert_mainloop_assertion(self.invalid_callback_message)
 
 
-
 class ExpectedError(Exception):
     pass
 
@@ -363,4 +372,3 @@ class TestSSLSocketNotAllowed(TestCase):
 
 if __name__ == '__main__':
     greentest.main()
-

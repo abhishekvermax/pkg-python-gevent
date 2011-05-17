@@ -2,6 +2,7 @@ import gevent
 from gevent import socket
 import unittest
 
+
 class Test(unittest.TestCase):
 
     def setUp(self):
@@ -13,7 +14,7 @@ class Test(unittest.TestCase):
 
     def tearDown(self):
         self.server.close()
-        self.acceptor.kill(block=True)
+        self.acceptor.kill()
         del self.acceptor
         del self.server
 

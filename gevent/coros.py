@@ -15,7 +15,7 @@ class Semaphore(object):
     """A semaphore manages a counter representing the number of release() calls minus the number of acquire() calls,
     plus an initial value. The acquire() method blocks if necessary until it can return without making the counter
     negative.
-    
+
     If not given, value defaults to 1."""
 
     def __init__(self, value=1):
@@ -110,8 +110,9 @@ class Semaphore(object):
                         result = get_hub().switch()
                         assert result is self, 'Invalid switch into Semaphore.acquire(): %r' % (result, )
                     except Timeout, ex:
-                        if ex is not timer:
-                            raise
+                        if ex is timer:
+                            return False
+                        raise
                 finally:
                     timer.cancel()
             finally:
@@ -171,7 +172,7 @@ class BoundedSemaphore(Semaphore):
 
     def release(self):
         if self.counter >= self._initial_value:
-            raise ValueError, "Semaphore released too many times"
+            raise ValueError("Semaphore released too many times")
         return Semaphore.release(self)
 
 
@@ -231,4 +232,3 @@ class RLock(object):
 
     def _is_owned(self):
         return self._owner is getcurrent()
-

@@ -4,7 +4,8 @@ from gevent import core
 from gevent.timeout import Timeout
 from gevent.event import Event
 
-__all__ = ['error', 'select']
+__implements__ = ['select']
+__all__ = ['error'] + __implements__
 
 __select__ = __import__('select')
 error = __select__.error
@@ -14,8 +15,8 @@ def get_fileno(obj):
     try:
         fileno_f = obj.fileno
     except AttributeError:
-        if not isinstance(obj, int):
-            raise TypeError("Must be int or have fileno() method: %r" % (obj, ))
+        if not isinstance(obj, (int, long)):
+            raise TypeError('argument must be an int, or have a fileno() method: %r' % (obj, ))
         return obj
     else:
         return fileno_f()
@@ -65,4 +66,3 @@ def select(rlist, wlist, xlist, timeout=None):
         for evt in allevents:
             evt.cancel()
         timeout.cancel()
-

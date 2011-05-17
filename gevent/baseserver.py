@@ -43,11 +43,12 @@ class BaseServer(object):
         self.set_listener(listener, backlog=backlog)
         self.set_spawn(spawn)
         self.set_handle(handle)
+        self.started = None
 
     def set_listener(self, listener, backlog=None):
         if hasattr(listener, 'accept'):
             if hasattr(listener, 'do_handshake'):
-                raise TypeError('Expected a regular socket, not SSLObject: %r' % (listener, ))
+                raise TypeError('Expected a regular socket, not SSLSocket: %r' % (listener, ))
             if backlog is not None:
                 raise TypeError('backlog must be None when a socket instance is passed')
             self.address = listener.getsockname()
@@ -66,7 +67,7 @@ class BaseServer(object):
         elif hasattr(spawn, 'spawn'):
             self.pool = spawn
             self._spawn = spawn.spawn
-        elif isinstance(spawn, int):
+        elif isinstance(spawn, (int, long)):
             from gevent.pool import Pool
             self.pool = Pool(spawn)
             self._spawn = self.pool.spawn
@@ -99,7 +100,10 @@ class BaseServer(object):
         else:
             result = ''
         try:
-            result += 'address=%s:%s' % self.address
+            if isinstance(self.address, tuple) and len(self.address) == 2:
+                result += 'address=%s:%s' % self.address
+            else:
+                result += 'address=%s' % (self.address, )
         except Exception, ex:
             result += str(ex) or '<error>'
         try:
@@ -113,12 +117,14 @@ class BaseServer(object):
     @property
     def server_host(self):
         """IP address that the server is bound to (string)."""
-        return self.address[0]
+        if isinstance(self.address, tuple):
+            return self.address[0]
 
     @property
     def server_port(self):
         """Port that the server is bound to (an integer)."""
-        return self.address[1]
+        if isinstance(self.address, tuple):
+            return self.address[1]
 
     def pre_start(self):
         """If the user initialized the server with an address rather than socket,
@@ -126,7 +132,6 @@ class BaseServer(object):
 
         It is not supposed to be called by the user, it is called by :meth:`start` before starting
         the accept loop."""
-        assert not self.started, '%s already started' % self.__class__.__name__
         if not hasattr(self, 'socket'):
             self.socket = _tcp_listener(self.address, backlog=self.backlog, reuse_addr=self.reuse_addr)
             self.address = self.socket.getsockname()
@@ -137,29 +142,34 @@ class BaseServer(object):
 
         If an address was provided in the constructor, then also create a socket, bind it and put it into the listening mode.
         """
+        assert not self.started, '%s already started' % self.__class__.__name__
         self.pre_start()
+        self.started = True
         try:
             self.start_accepting()
-        except Exception:
-            Greenlet.spawn(self.kill).join()
+        except:
+            self.kill()
             raise
 
     def kill(self):
         """Close the listener socket and stop accepting."""
-        self.stop_accepting()
+        self.started = False
         try:
-            self.socket.close()
-        except Exception:
-            pass
-        self.__dict__.pop('socket', None)
-        self.__dict__.pop('handle', None)
+            self.stop_accepting()
+        finally:
+            try:
+                self.socket.close()
+            except Exception:
+                pass
+            self.__dict__.pop('socket', None)
+            self.__dict__.pop('handle', None)
 
     def stop(self, timeout=None):
         """Stop accepting the connections and close the listening socket.
 
         If the server uses a pool to spawn the requests, then :meth:`stop` also waits
         for all the handlers to exit. If there are still handlers executing after *timeout*
-        has expired (default 1 second), then the currenlty running handlers in the pool are killed."""
+        has expired (default 1 second), then the currently running handlers in the pool are killed."""
         self.kill()
         if timeout is None:
             timeout = self.stop_timeout
@@ -179,7 +189,7 @@ class BaseServer(object):
         try:
             self._stopped_event.wait()
         except:
-            Greenlet.spawn(self.stop, timeout=stop_timeout).join()
+            self.stop(timeout=stop_timeout)
             raise
 
 
@@ -192,8 +202,13 @@ def _tcp_listener(address, backlog=50, reuse_addr=None):
     sock = _socket.socket()
     if reuse_addr is not None:
         sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, reuse_addr)
-    sock.bind(address)
+    try:
+        sock.bind(address)
+    except _socket.error, ex:
+        strerror = getattr(ex, 'strerror', None)
+        if strerror is not None:
+            ex.strerror = strerror + ': ' + repr(address)
+        raise
     sock.listen(backlog)
     sock.setblocking(0)
     return sock
-

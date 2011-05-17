@@ -48,13 +48,6 @@ class Settings(http_Settings):
         result = conn.read()
         assert not result, repr(result)
 
-#     @staticmethod
-#     def assert500(self):
-#         conn = self.makefile()
-#         result = conn.read()
-#         assert not result, repr(result)
-
-
 
 test__server.Settings = Settings
 
@@ -69,4 +62,3 @@ del TestNoneSpawn
 
 if __name__ == '__main__':
     unittest.main()
-

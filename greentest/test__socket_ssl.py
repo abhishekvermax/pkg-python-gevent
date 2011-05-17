@@ -8,13 +8,14 @@ import socket
 if not hasattr(socket, 'ssl'):
     sys.exit(0)
 
+
 class AmazonHTTPSTests(unittest.TestCase):
 
     def test_amazon_response(self):
         conn = httplib.HTTPSConnection('sdb.amazonaws.com')
         conn.debuglevel = 1
         conn.request('GET', '/')
-        resp = conn.getresponse()
+        conn.getresponse()
 
     def test_str_and_repr(self):
         conn = socket.socket()
@@ -26,4 +27,3 @@ class AmazonHTTPSTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

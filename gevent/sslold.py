@@ -1,6 +1,8 @@
 """OpenSSL-based implementation of SSLObject.
 
-Use when :mod:`ssl` module is not present.
+.. warning::
+
+    This module is deprecated. Use :mod:`ssl <gevent.ssl>` instead.
 """
 from OpenSSL import SSL
 from gevent.socket import socket, _fileobject, __socket__, error, timeout, EWOULDBLOCK
@@ -9,9 +11,13 @@ import sys
 
 __all__ = ['ssl', 'sslerror']
 
+import warnings
+warnings.warn("gevent.sslold is deprecated; use gevent.ssl instead (install ssl package from PyPI)", DeprecationWarning, stacklevel=2)
+
 try:
     sslerror = __socket__.sslerror
 except AttributeError:
+
     class sslerror(error):
         pass
 
@@ -176,7 +182,7 @@ def wrap_socket(sock, keyfile=None, certfile=None,
                 do_handshake_on_connect=None,
                 suppress_ragged_eofs=None):
     """Create a new :class:`SSLObject` instance.
-    
+
     For compatibility with :mod:`gevent.ssl` the function accepts all the arguments that :func:`gevent.ssl.wrap_socket`
     accepts. However, it only understands what *sock*, *keyfile* and *certfile* mean, so it will raise
     :exc:`ImportError` if you pass anything else.
@@ -185,4 +191,3 @@ def wrap_socket(sock, keyfile=None, certfile=None,
         if locals()[arg] is not None:
             raise TypeError('To use argument %r install ssl package: http://pypi.python.org/pypi/ssl' % arg)
     return ssl(sock, keyfile=keyfile, certfile=certfile)
-

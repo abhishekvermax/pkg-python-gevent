@@ -31,29 +31,49 @@ For convenience, exceptions (like :class:`error <socket.error>` and :class:`time
 as well as the constants from :mod:`socket` module are imported into this module.
 """
 
+# standard functions and classes that this module re-implements in a gevent-aware way:
+__implements__ = ['create_connection',
+                  'getaddrinfo',
+                  'gethostbyname',
+                  'socket',
+                  'SocketType',
+                  'fromfd',
+                  'socketpair']
 
-__all__ = ['create_connection',
-           'error',
-           'fromfd',
-           'gaierror',
-           'getaddrinfo',
-           'gethostbyname',
-           'inet_aton',
-           'inet_ntoa',
-           'inet_pton',
-           'inet_ntop',
-           'socket',
-           'socketpair',
-           'timeout',
-           'ssl',
-           'sslerror',
-           'SocketType',
-           'wait_read',
-           'wait_write',
-           'wait_readwrite']
+# non-standard functions that this module provides:
+__extensions__ = ['wait_read',
+                  'wait_write',
+                  'wait_readwrite']
+
+# standard functions and classes that this module re-imports
+__imports__ = ['error',
+               'gaierror',
+               'getfqdn',
+               'herror',
+               'htonl',
+               'htons',
+               'ntohl',
+               'ntohs',
+               'inet_aton',
+               'inet_ntoa',
+               'inet_pton',
+               'inet_ntop',
+               'timeout',
+               'gethostname',
+               'getprotobyname',
+               'getservbyname',
+               'getservbyport',
+               'getdefaulttimeout',
+               'setdefaulttimeout',
+               # Python 2.5 and older:
+               'RAND_add',
+               'RAND_egd',
+               'RAND_status',
+               # Windows:
+               'errorTab']
+
 
 import sys
-import errno
 import time
 import random
 import re
@@ -68,7 +88,7 @@ if is_windows:
     from errno import WSAEALREADY as EALREADY
     from errno import WSAEISCONN as EISCONN
     from gevent.win32util import formatError as strerror
-    EGAIN = EWOULDBLOCK
+    EAGAIN = EWOULDBLOCK
 else:
     from errno import EINVAL
     from errno import EWOULDBLOCK
@@ -78,54 +98,46 @@ else:
     from errno import EISCONN
     from os import strerror
 
+try:
+    from errno import EBADF
+except ImportError:
+    EBADF = 9
 
 import _socket
-error = _socket.error
-timeout = _socket.timeout
 _realsocket = _socket.socket
 __socket__ = __import__('socket')
 _fileobject = __socket__._fileobject
-gaierror = _socket.gaierror
 
-# Import public constants from the standard socket (called __socket__ here) into this module.
+for name in __imports__[:]:
+    try:
+        value = getattr(__socket__, name)
+        globals()[name] = value
+    except AttributeError:
+        __imports__.remove(name)
 
 for name in __socket__.__all__:
-    if name[:1].isupper():
-        value = getattr(__socket__, name)
-        if isinstance(value, (int, basestring)):
-            globals()[name] = value
-            __all__.append(name)
-    elif name == 'getfqdn':
-        globals()[name] = getattr(__socket__, name)
-        __all__.append(name)
+    value = getattr(__socket__, name)
+    if isinstance(value, (int, long, basestring)):
+        globals()[name] = value
+        __imports__.append(name)
 
 del name, value
 
-inet_ntoa = _socket.inet_ntoa
-inet_aton = _socket.inet_aton
-try:
-    inet_ntop = _socket.inet_ntop
-except AttributeError:
+if 'inet_ntop' not in globals():
+    # inet_ntop is required by our implementation of getaddrinfo
+
     def inet_ntop(address_family, packed_ip):
         if address_family == AF_INET:
             return inet_ntoa(packed_ip)
         # XXX: ipv6 won't work on windows
         raise NotImplementedError('inet_ntop() is not available on this platform')
-try:
-    inet_pton = _socket.inet_pton
-except AttributeError:
-    def inet_pton(address_family, ip_string):
-        if address_family == AF_INET:
-            return inet_aton(ip_string)
-        # XXX: ipv6 won't work on windows
-        raise NotImplementedError('inet_ntop() is not available on this platform')
 
-# XXX: import other non-blocking stuff, like ntohl
 # XXX: implement blocking functions that are not yet implemented
-# XXX: add test that checks that socket.__all__ matches gevent.socket.__all__ on all supported platforms
 
 from gevent.hub import getcurrent, get_hub
 from gevent import core
+from gevent import spawn
+from gevent.util import wrap_errors
 
 _ip4_re = re.compile('^[\d\.]+$')
 
@@ -211,7 +223,7 @@ def __cancel_wait(event):
     if event.pending:
         arg = event.arg
         if arg is not None:
-            arg[0].throw(error(errno.EBADF, 'File descriptor was closed in another greenlet'))
+            arg[0].throw(error(EBADF, 'File descriptor was closed in another greenlet'))
 
 
 def cancel_wait(event):
@@ -244,14 +256,16 @@ if sys.version_info[:2] <= (2, 4):
 if sys.version_info[:2] < (2, 7):
     _get_memory = buffer
 else:
+
     def _get_memory(string, offset):
         return memoryview(string)[offset:]
 
 
 class _closedsocket(object):
     __slots__ = []
+
     def _dummy(*args):
-        raise error(errno.EBADF, 'Bad file descriptor')
+        raise error(EBADF, 'Bad file descriptor')
     # All _delegate_methods must also be initialized here.
     send = recv = recv_into = sendto = recvfrom = recvfrom_into = _dummy
     __getattr__ = _dummy
@@ -260,6 +274,7 @@ class _closedsocket(object):
 _delegate_methods = ("recv", "recvfrom", "recv_into", "recvfrom_into", "send", "sendto", 'sendall')
 
 timeout_default = object()
+
 
 class socket(object):
 
@@ -279,7 +294,12 @@ class socket(object):
         self._sock.setblocking(0)
         self._read_event = core.event(core.EV_READ, self.fileno(), _wait_helper)
         self._write_event = core.event(core.EV_WRITE, self.fileno(), _wait_helper)
-        self._rw_event = core.event(core.EV_READ|core.EV_WRITE, self.fileno(), _wait_helper)
+        # regarding the following, see issue #31
+        # (http://code.google.com/p/gevent/issues/detail?id=31#c19)
+        if is_windows:
+            self._rw_event = core.event(core.EV_READ | core.EV_WRITE, self.fileno(), _wait_helper)
+        else:
+            self._rw_event = core.event(core.EV_WRITE, self.fileno(), _wait_helper)
 
     def __repr__(self):
         return '<%s at %s %s>' % (type(self).__name__, hex(id(self)), self._formatinfo())
@@ -307,7 +327,7 @@ class socket(object):
             result += ' sock=' + str(sockname)
         if peername is not None:
             result += ' peer=' + str(peername)
-        if self.timeout is not None:
+        if getattr(self, 'timeout', None) is not None:
             result += ' timeout=' + str(self.timeout)
         return result
 
@@ -318,7 +338,7 @@ class socket(object):
                 client_socket, address = sock.accept()
                 break
             except error, ex:
-                if ex[0] != errno.EWOULDBLOCK or self.timeout == 0.0:
+                if ex[0] != EWOULDBLOCK or self.timeout == 0.0:
                     raise
                 sys.exc_clear()
             wait_read(sock.fileno(), timeout=self.timeout, event=self._read_event)
@@ -334,7 +354,7 @@ class socket(object):
             setattr(self, method, dummy)
 
     def connect(self, address):
-        if isinstance(address, tuple) and len(address)==2:
+        if isinstance(address, tuple) and len(address) == 2:
             address = gethostbyname(address[0]), address[1]
         if self.timeout == 0.0:
             return self._sock.connect(address)
@@ -377,7 +397,7 @@ class socket(object):
             if type(ex) is error:
                 return ex[0]
             else:
-                raise # gaierror is not silented by connect_ex
+                raise  # gaierror is not silented by connect_ex
 
     def dup(self):
         """dup() -> socket object
@@ -392,12 +412,12 @@ class socket(object):
         return _fileobject(self.dup(), mode, bufsize)
 
     def recv(self, *args):
-        sock = self._sock # keeping the reference so that fd is not closed during waiting
+        sock = self._sock  # keeping the reference so that fd is not closed during waiting
         while True:
             try:
                 return sock.recv(*args)
             except error, ex:
-                if ex[0] == errno.EBADF:
+                if ex[0] == EBADF:
                     return ''
                 if ex[0] != EWOULDBLOCK or self.timeout == 0.0:
                     raise
@@ -406,7 +426,7 @@ class socket(object):
             try:
                 wait_read(sock.fileno(), timeout=self.timeout, event=self._read_event)
             except error, ex:
-                if ex[0] == errno.EBADF:
+                if ex[0] == EBADF:
                     return ''
                 raise
 
@@ -438,7 +458,7 @@ class socket(object):
             try:
                 return sock.recv_into(*args)
             except error, ex:
-                if ex[0] == errno.EBADF:
+                if ex[0] == EBADF:
                     return 0
                 if ex[0] != EWOULDBLOCK or self.timeout == 0.0:
                     raise
@@ -446,7 +466,7 @@ class socket(object):
             try:
                 wait_read(sock.fileno(), timeout=self.timeout, event=self._read_event)
             except error, ex:
-                if ex[0] == errno.EBADF:
+                if ex[0] == EBADF:
                     return 0
                 raise
 
@@ -463,7 +483,7 @@ class socket(object):
             try:
                 wait_write(sock.fileno(), timeout=timeout, event=self._write_event)
             except error, ex:
-                if ex[0] == errno.EBADF:
+                if ex[0] == EBADF:
                     return 0
                 raise
             try:
@@ -530,6 +550,17 @@ class socket(object):
     def gettimeout(self):
         return self.timeout
 
+    def shutdown(self, how):
+        cancel_wait(self._rw_event)
+        if how == 0:  # SHUT_RD
+            cancel_wait(self._read_event)
+        elif how == 1:  # SHUT_RW
+            cancel_wait(self._write_event)
+        else:
+            cancel_wait(self._read_event)
+            cancel_wait(self._write_event)
+        self._sock.shutdown(how)
+
     family = property(lambda self: self._sock.family, doc="the socket family")
     type = property(lambda self: self._sock.type, doc="the socket type")
     proto = property(lambda self: self._sock.proto, doc="the socket protocol")
@@ -545,17 +576,19 @@ class socket(object):
 SocketType = socket
 
 if hasattr(_socket, 'socketpair'):
+
     def socketpair(*args):
         one, two = _socket.socketpair(*args)
         return socket(_sock=one), socket(_sock=two)
 else:
-    __all__.remove('socketpair')
+    __implements__.remove('socketpair')
 
 if hasattr(_socket, 'fromfd'):
+
     def fromfd(*args):
         return socket(_sock=_socket.fromfd(*args))
 else:
-    __all__.remove('fromfd')
+    __implements__.remove('fromfd')
 
 
 def bind_and_listen(descriptor, address=('', 0), backlog=50, reuse_addr=True):
@@ -580,6 +613,7 @@ try:
 except AttributeError:
     _GLOBAL_DEFAULT_TIMEOUT = object()
 
+
 def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT, source_address=None):
     """Connect to *address* and return the socket object.
 
@@ -593,8 +627,8 @@ def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT, source_address=N
     An host of '' or port 0 tells the OS to use the default.
     """
 
-    msg = "getaddrinfo returns an empty list"
     host, port = address
+    err = None
     for res in getaddrinfo(host, port, 0, SOCK_STREAM):
         af, socktype, proto, _canonname, sa = res
         sock = None
@@ -606,10 +640,15 @@ def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT, source_address=N
                 sock.bind(source_address)
             sock.connect(sa)
             return sock
-        except error, msg:
+        except error, ex:
+            err = ex
+            sys.exc_clear()
             if sock is not None:
                 sock.close()
-    raise error, msg
+    if err is not None:
+        raise err
+    else:
+        raise error("getaddrinfo returns an empty list")
 
 
 try:
@@ -617,8 +656,8 @@ try:
 except Exception:
     import traceback
     traceback.print_exc()
-    __all__.remove('gethostbyname')
-    __all__.remove('getaddrinfo')
+    __implements__.remove('gethostbyname')
+    __implements__.remove('getaddrinfo')
 else:
 
     def gethostbyname(hostname):
@@ -644,45 +683,53 @@ else:
         _ttl, addrs = resolve_ipv4(hostname)
         return inet_ntoa(random.choice(addrs))
 
-
-    def getaddrinfo(host, port, *args, **kwargs):
+    def getaddrinfo(host, port, family=0, socktype=0, proto=0, flags=0, evdns_flags=0):
         """*Some* approximation of :func:`socket.getaddrinfo` implemented using :mod:`gevent.dns`.
 
         If *host* is not a string, does not has any dots or is a numeric IP address, then
         the standard :func:`socket.getaddrinfo` is called.
 
-        Otherwise, calls either :func:`resolve_ipv4` or :func:`resolve_ipv6` and
-        formats the result the way :func:`socket.getaddrinfo` does it.
+        Otherwise, calls :func:`resolve_ipv4` (for ``AF_INET``) or :func:`resolve_ipv6` (for ``AF_INET6``) or
+        both (for ``AF_UNSPEC``) and formats the result the way :func:`socket.getaddrinfo` does it.
 
         Differs in the following ways:
 
         * raises :class:`DNSError` (a subclass of :class:`gaierror`) with libevent-dns error
           codes instead of standard socket error codes
-        * IPv6 support is untested.
-        * AF_UNSPEC only tries IPv4
-        * only supports TCP, UDP, IP protocols
-        * port must be numeric, does not support string service names. see socket.getservbyname
         * *flags* argument is ignored
+        * for IPv6, flow info and scope id are always 0
 
         Additionally, supports *evdns_flags* keyword arguments (default ``0``) that is passed
         to :mod:`dns` functions.
         """
-        family, socktype, proto, _flags = args + (None, ) * (4 - len(args))
-        if not isinstance(host, str) or '.' not in host or _ip4_re.match(host):
-            return _socket.getaddrinfo(host, port, *args)
+        if isinstance(host, unicode):
+            host = host.encode('idna')
+        if not isinstance(host, str) or \
+           '.' not in host or \
+           _ip4_re.match(host) is not None or \
+           family not in (AF_UNSPEC, AF_INET, AF_INET6):
+            return _socket.getaddrinfo(host, port, family, socktype, proto, flags)
 
-        evdns_flags = kwargs.pop('evdns_flags', 0)
-        if kwargs:
-            raise TypeError('Unsupported keyword arguments: %s' % (kwargs.keys(), ))
-
-        if family in (None, AF_INET, AF_UNSPEC):
-            family = AF_INET
-            # TODO: AF_UNSPEC means try both AF_INET and AF_INET6
-            _ttl, addrs = resolve_ipv4(host, evdns_flags)
-        elif family == AF_INET6:
-            _ttl, addrs = resolve_ipv6(host, evdns_flags)
-        else:
-            raise NotImplementedError('family is not among AF_UNSPEC/AF_INET/AF_INET6: %r' % (family, ))
+        if isinstance(port, basestring):
+            try:
+                if socktype == 0:
+                    try:
+                        port = getservbyname(port, 'tcp')
+                        socktype = SOCK_STREAM
+                    except socket.error:
+                        port = getservbyname(port, 'udp')
+                        socktype = SOCK_DGRAM
+                elif socktype == SOCK_STREAM:
+                    port = getservbyname(port, 'tcp')
+                elif socktype == SOCK_DGRAM:
+                    port = getservbyname(port, 'udp')
+                else:
+                    raise gaierror(EAI_SERVICE, 'Servname not supported for ai_socktype')
+            except error, ex:
+                if 'not found' in str(ex):
+                    raise gaierror(EAI_SERVICE, 'Servname not supported for ai_socktype')
+                else:
+                    raise gaierror(str(ex))
 
         socktype_proto = [(SOCK_STREAM, 6), (SOCK_DGRAM, 17), (SOCK_RAW, 0)]
         if socktype:
@@ -691,9 +738,42 @@ else:
             socktype_proto = [(x, y) for (x, y) in socktype_proto if proto == y]
 
         result = []
-        for addr in addrs:
-            for socktype, proto in socktype_proto:
-                result.append((family, socktype, proto, '', (inet_ntop(family, addr), port)))
+
+        if family == AF_INET:
+            for res in resolve_ipv4(host, evdns_flags)[1]:
+                sockaddr = (inet_ntop(family, res), port)
+                for socktype, proto in socktype_proto:
+                    result.append((family, socktype, proto, '', sockaddr))
+        elif family == AF_INET6:
+            for res in resolve_ipv6(host, evdns_flags)[1]:
+                sockaddr = (inet_ntop(family, res), port, 0, 0)
+                for socktype, proto in socktype_proto:
+                    result.append((family, socktype, proto, '', sockaddr))
+        else:
+            failure = None
+            job = spawn(wrap_errors(gaierror, resolve_ipv6), host, evdns_flags)
+            try:
+                try:
+                    ipv4_res = resolve_ipv4(host, evdns_flags)[1]
+                except gaierror, failure:
+                    ipv4_res = None
+                ipv6_res = job.get()
+                if isinstance(ipv6_res, gaierror):
+                    ipv6_res = None
+                    if failure is not None:
+                        raise
+                if ipv4_res is not None:
+                    for res in ipv4_res:
+                        sockaddr = (inet_ntop(AF_INET, res), port)
+                        for socktype, proto in socktype_proto:
+                            result.append((AF_INET, socktype, proto, '', sockaddr))
+                if ipv6_res is not None:
+                    for res in ipv6_res[1]:
+                        sockaddr = (inet_ntop(AF_INET6, res), port, 0, 0)
+                        for socktype, proto in socktype_proto:
+                            result.append((AF_INET6, socktype, proto, '', sockaddr))
+            finally:
+                job.kill()
         return result
         # TODO libevent2 has getaddrinfo that is probably better than the hack above; should wrap that.
 
@@ -701,16 +781,17 @@ else:
 _have_ssl = False
 
 try:
-    from gevent.ssl import sslwrap_simple as ssl, SSLError as sslerror
+    from gevent.ssl import sslwrap_simple as ssl, SSLError as sslerror, SSLSocket as SSLType
     _have_ssl = True
 except ImportError:
     try:
-        from gevent.sslold import ssl, sslerror
+        from gevent.sslold import ssl, sslerror, SSLObject as SSLType
         _have_ssl = True
     except ImportError:
         pass
 
-if not _have_ssl:
-    __all__.remove('ssl')
-    __all__.remove('sslerror')
+if sys.version_info[:2] <= (2, 5) and _have_ssl:
+    __implements__.extend(['ssl', 'sslerror', 'SSLType'])
 
+
+__all__ = __implements__ + __extensions__ + __imports__
