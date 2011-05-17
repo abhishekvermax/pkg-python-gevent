@@ -2,7 +2,6 @@
 import greentest
 from gevent import dns
 from gevent import core
-from gevent import socket
 from gevent.dns import DNSError
 
 funcs = [dns.resolve_ipv4, dns.resolve_ipv6,
@@ -29,6 +28,7 @@ class TestNoSwitch(greentest.TestCase):
 class TestSwitch(greentest.TestCase):
 
     switch_expected = True
+    __timeout__ = 10
 
     def test_empty_string(self):
         self.assertRaises(DNSError, dns.resolve_ipv4, '')
@@ -39,4 +39,3 @@ class TestSwitch(greentest.TestCase):
 
 if __name__ == '__main__':
     greentest.main()
-

@@ -19,14 +19,11 @@ __all__ = ['WSGIHandler', 'WSGIServer']
 
 
 MAX_REQUEST_LINE = 8192
-
 # Weekday and month names for HTTP date/time formatting; always English!
 _WEEKDAYNAME = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-_MONTHNAME = [None, # Dummy so we can use 1-based month numbers
+_MONTHNAME = [None,  # Dummy so we can use 1-based month numbers
               "Jan", "Feb", "Mar", "Apr", "May", "Jun",
               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-
-
 _INTERNAL_ERROR_STATUS = '500 Internal Server Error'
 _INTERNAL_ERROR_BODY = 'Internal Server Error'
 _INTERNAL_ERROR_HEADERS = [('Content-Type', 'text/plain'),
@@ -34,8 +31,8 @@ _INTERNAL_ERROR_HEADERS = [('Content-Type', 'text/plain'),
                            ('Content-Length', str(len(_INTERNAL_ERROR_BODY)))]
 _REQUEST_TOO_LONG_RESPONSE = "HTTP/1.0 414 Request URI Too Long\r\nConnection: close\r\nContent-length: 0\r\n\r\n"
 _BAD_REQUEST_RESPONSE = "HTTP/1.0 400 Bad Request\r\nConnection: close\r\nContent-length: 0\r\n\r\n"
-
 _CONTINUE_RESPONSE = "HTTP/1.1 100 Continue\r\n\r\n"
+
 
 def format_date_time(timestamp):
     year, month, day, hh, mm, ss, wd, _y, _z = time.gmtime(timestamp)
@@ -44,16 +41,16 @@ def format_date_time(timestamp):
 
 class Input(object):
 
-    def __init__(self, rfile, content_length, wfile=None, chunked_input=False):
+    def __init__(self, rfile, content_length, socket=None, chunked_input=False):
         self.rfile = rfile
         self.content_length = content_length
-        self.wfile = wfile
+        self.socket = socket
         self.position = 0
         self.chunked_input = chunked_input
         self.chunk_length = -1
 
     def _discard(self):
-        if self.wfile is None and (self.position < (self.content_length or 0) or self.chunked_input):
+        if self.socket is None and (self.position < (self.content_length or 0) or self.chunked_input):
             # ## Read and discard body
             while 1:
                 d = self.read(16384)
@@ -61,16 +58,22 @@ class Input(object):
                     break
 
     def _send_100_continue(self):
-        if self.wfile is not None:
-            self.wfile.write(_CONTINUE_RESPONSE)
-            self.wfile = None
+        if self.socket is not None:
+            self.socket.sendall(_CONTINUE_RESPONSE)
+            self.sendall = None
 
     def _do_read(self, reader, length=None):
+        content_length = self.content_length
+        if content_length is None:
+            # Either Content-Length or "Transfer-Encoding: chunked" must be present in a request with a body
+            # if it was chunked, then this function would have not been called
+            return ''
         self._send_100_continue()
-        if length is None and self.content_length is not None:
-            length = self.content_length - self.position
-        if length and length > self.content_length - self.position:
-            length = self.content_length - self.position
+        left = content_length - self.position
+        if length is None:
+            length = left
+        elif length > left:
+            length = left
         if not length:
             return ''
         read = reader(length)
@@ -152,16 +155,26 @@ class WSGIHandler(object):
     protocol_version = 'HTTP/1.1'
     MessageClass = mimetools.Message
 
-    def __init__(self, socket, address, server):
+    def __init__(self, socket, address, server, rfile=None):
         self.socket = socket
         self.client_address = address
         self.server = server
-        self.rfile = socket.makefile('rb', -1)
-        self.wfile = socket.makefile('wb', 0)
+        if rfile is None:
+            self.rfile = socket.makefile('rb', -1)
+        else:
+            self.rfile = rfile
+
+    @property
+    def wfile(self):
+        # DEPRECATED, UNTESTED, TO BE REMOVED
+        wfile = getattr(self, '_wfile', None)
+        if wfile is None:
+            wfile = self._wfile = self.socket.makefile('wb', 0)
+        return wfile
 
     def handle(self):
         try:
-            while True:
+            while self.socket is not None:
                 self.time_start = time.time()
                 self.time_finish = 0
                 result = self.handle_one_request()
@@ -170,21 +183,27 @@ class WSGIHandler(object):
                 if result is True:
                     continue
                 self.status, response_body = result
-                self.wfile.write(response_body)
+                self.socket.sendall(response_body)
                 if self.time_finish == 0:
                     self.time_finish = time.time()
                 self.log_request()
                 break
         finally:
+            if self.socket is not None:
+                try:
+                    self.socket._sock.close()  # do not rely on garbage collection
+                    self.socket.close()
+                except socket.error:
+                    pass
             self.__dict__.pop('socket', None)
             self.__dict__.pop('rfile', None)
-            self.__dict__.pop('wfile', None)
+            self.__dict__.pop('_wfile', None)  # XXX remove once wfile property is gone
 
     def _check_http_version(self):
         version = self.request_version
         if not version.startswith("HTTP/"):
             return False
-        version = tuple(int(x) for x in version[5:].split(".")) # "HTTP/"
+        version = tuple(int(x) for x in version[5:].split("."))  # "HTTP/"
         if version[1] < 0 or version < (0, 9) or version >= (2, 0):
             return False
         return True
@@ -203,8 +222,9 @@ class WSGIHandler(object):
                 self.log_error('Expected GET method: %r', raw_requestline)
                 return
             self.request_version = "HTTP/0.9"
+            # QQQ I'm pretty sure we can drop support for HTTP/0.9
         else:
-            self.log_error('Invalid GET method: %r', raw_requestline)
+            self.log_error('Invalid HTTP method: %r', raw_requestline)
             return
 
         self.headers = self.MessageClass(self.rfile, 0)
@@ -247,22 +267,28 @@ class WSGIHandler(object):
         except Exception:
             traceback.print_exc()
             message = '%r %r' % (msg, args)
-            sys.exc_clear()
         try:
             message = '%s: %s' % (self.socket, message)
         except Exception:
-            sys.exc_clear()
+            pass
         try:
             sys.stderr.write(message + '\n')
         except Exception:
             traceback.print_exc()
-            sys.exc_clear()
+
+    def read_requestline(self):
+        return self.rfile.readline(MAX_REQUEST_LINE)
 
     def handle_one_request(self):
         if self.rfile.closed:
             return
 
-        raw_requestline = self.rfile.readline(MAX_REQUEST_LINE)
+        try:
+            raw_requestline = self.read_requestline()
+        except socket.error:
+            # "Connection reset by peer" or other socket errors aren't interesting here
+            return
+
         if not raw_requestline:
             return
 
@@ -299,17 +325,13 @@ class WSGIHandler(object):
         if self.rfile.closed:
             return
 
-        return True # read more requests
+        return True  # read more requests
 
     def write(self, data):
         towrite = []
         if not self.status:
             raise AssertionError("The application did not call start_response()")
         if not self.headers_sent:
-            if hasattr(self.result, '__len__') and 'Content-Length' not in self.response_headers_list:
-                self.response_headers.append(('Content-Length', str(sum(len(chunk) for chunk in self.result))))
-                self.response_headers_list.append('Content-Length')
-
             if 'Date' not in self.response_headers_list:
                 self.response_headers.append(('Date', format_date_time(time.time())))
                 self.response_headers_list.append('Date')
@@ -317,14 +339,21 @@ class WSGIHandler(object):
             if self.request_version == 'HTTP/1.0' and 'Connection' not in self.response_headers_list:
                 self.response_headers.append(('Connection', 'close'))
                 self.response_headers_list.append('Connection')
-                self.close_connection = 1
+                self.close_connection = True
             elif ('Connection', 'close') in self.response_headers:
-                self.close_connection = 1
+                self.close_connection = True
 
-            if self.request_version != 'HTTP/1.0' and 'Content-Length' not in self.response_headers_list:
-                self.response_use_chunked = True
-                self.response_headers.append(('Transfer-Encoding', 'chunked'))
-                self.response_headers_list.append('Transfer-Encoding')
+            if self.code not in [204, 304]:
+                # the reply will include message-body; make sure we have either Content-Length or chunked
+                if 'Content-Length' not in self.response_headers_list:
+                    if hasattr(self.result, '__len__'):
+                        self.response_headers.append(('Content-Length', str(sum(len(chunk) for chunk in self.result))))
+                        self.response_headers_list.append('Content-Length')
+                    else:
+                        if self.request_version != 'HTTP/1.0':
+                            self.response_use_chunked = True
+                            self.response_headers.append(('Transfer-Encoding', 'chunked'))
+                            self.response_headers_list.append('Transfer-Encoding')
 
             towrite.append('%s %s\r\n' % (self.request_version, self.status))
             for header in self.response_headers:
@@ -340,8 +369,9 @@ class WSGIHandler(object):
             else:
                 towrite.append(data)
 
-        self.wfile.writelines(towrite)
-        self.response_length += sum(len(x) for x in towrite)
+        msg = ''.join(towrite)
+        self.socket.sendall(msg)
+        self.response_length += len(msg)
 
     def start_response(self, status, headers, exc_info=None):
         if exc_info:
@@ -352,6 +382,7 @@ class WSGIHandler(object):
             finally:
                 # Avoid dangling circular ref
                 exc_info = None
+        self.code = int(status.split(' ', 1)[0])
         self.status = status
         self.response_headers = [('-'.join([x.capitalize() for x in key.split('-')]), value) for key, value in headers]
         self.response_headers_list = [x[0] for x in self.response_headers]
@@ -364,13 +395,34 @@ class WSGIHandler(object):
 
     def format_request(self):
         now = datetime.now().replace(microsecond=0)
-        return '%s - - [%s] "%s" %s %s %.6f' % (
+        if self.time_finish:
+            delta = '%.6f' % (self.time_finish - self.time_start)
+            length = self.response_length
+        else:
+            delta = '-'
+            if not self.response_length:
+                length = '-'
+        return '%s - - [%s] "%s" %s %s %s' % (
             self.client_address[0],
             now,
             self.requestline,
             (self.status or '000').split()[0],
-            self.response_length,
-            self.time_finish - self.time_start)
+            length,
+            delta)
+
+    def process_result(self):
+        for data in self.result:
+            if data:
+                self.write(data)
+        if self.status and not self.headers_sent:
+            self.write('')
+        if self.response_use_chunked:
+            self.socket.sendall('0\r\n\r\n')
+            self.response_length += 5
+
+    def run_application(self):
+        self.result = self.application(self.environ, self.start_response)
+        self.process_result()
 
     def handle_one_response(self):
         self.time_start = time.time()
@@ -383,15 +435,7 @@ class WSGIHandler(object):
 
         try:
             try:
-                self.result = self.application(self.environ, self.start_response)
-                for data in self.result:
-                    if data:
-                        self.write(data)
-                if self.status and not self.headers_sent:
-                    self.write('')
-                if self.response_use_chunked:
-                    self.wfile.writelines('0\r\n\r\n')
-                    self.response_length += 5
+                self.run_application()
             except GreenletExit:
                 raise
             except Exception:
@@ -428,9 +472,7 @@ class WSGIHandler(object):
         env['PATH_INFO'] = unquote(path)
         env['QUERY_STRING'] = query
 
-        if self.headers.typeheader is None:
-            env['CONTENT_TYPE'] = self.headers.type
-        else:
+        if self.headers.typeheader is not None:
             env['CONTENT_TYPE'] = self.headers.typeheader
 
         length = self.headers.getheader('content-length')
@@ -438,11 +480,7 @@ class WSGIHandler(object):
             env['CONTENT_LENGTH'] = length
         env['SERVER_PROTOCOL'] = 'HTTP/1.0'
 
-        host, port = self.socket.getsockname()
-        env['SERVER_NAME'] = host
-        env['SERVER_PORT'] = str(port)
         env['REMOTE_ADDR'] = self.client_address[0]
-        env['GATEWAY_INTERFACE'] = 'CGI/1.1'
 
         for header in self.headers.headers:
             key, value = header.split(':', 1)
@@ -451,16 +489,19 @@ class WSGIHandler(object):
                 value = value.strip()
                 key = 'HTTP_' + key
                 if key in env:
-                    env[key] += ',' + value
+                    if 'COOKIE' in key:
+                        env[key] += '; ' + value
+                    else:
+                        env[key] += ',' + value
                 else:
                     env[key] = value
 
         if env.get('HTTP_EXPECT') == '100-continue':
-            wfile = self.wfile
+            socket = self.socket
         else:
-            wfile = None
+            socket = None
         chunked = env.get('HTTP_TRANSFER_ENCODING', '').lower() == 'chunked'
-        self.wsgi_input = Input(self.rfile, self.content_length, wfile=wfile, chunked_input=chunked)
+        self.wsgi_input = Input(self.rfile, self.content_length, socket=socket, chunked_input=chunked)
         env['wsgi.input'] = self.wsgi_input
         return env
 
@@ -509,9 +550,21 @@ class WSGIServer(StreamServer):
 
     def pre_start(self):
         StreamServer.pre_start(self)
-        if 'SERVER_NAME' not in self.environ:
-            self.environ['SERVER_NAME'] = socket.getfqdn(self.server_host)
-        self.environ.setdefault('SERVER_PORT', str(self.server_port))
+        self.update_environ()
+
+    def update_environ(self):
+        address = self.address
+        if isinstance(address, tuple):
+            if 'SERVER_NAME' not in self.environ:
+                try:
+                    name = socket.getfqdn(address[0])
+                except socket.error:
+                    name = str(address[0])
+                self.environ['SERVER_NAME'] = name
+            self.environ.setdefault('SERVER_PORT', str(address[1]))
+        else:
+            self.environ.setdefault('SERVER_NAME', '')
+            self.environ.setdefault('SERVER_PORT', '')
 
     def handle(self, socket, address):
         handler = self.handler_class(socket, address, self)

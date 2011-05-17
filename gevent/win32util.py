@@ -26,6 +26,9 @@ The code is taken from twisted.python.win32 module.
 import os
 
 
+__all__ = ['formatError']
+
+
 class _ErrorFormatter(object):
     """
     Formatter for Windows error messages.
@@ -65,7 +68,6 @@ class _ErrorFormatter(object):
             errorTab = None
         return cls(WinError, FormatMessage, errorTab)
     fromEnvironment = classmethod(fromEnvironment)
-
 
     def formatError(self, errorcode):
         """

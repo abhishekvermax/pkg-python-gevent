@@ -5,7 +5,7 @@
 For the documentation, refer to :mod:`ssl` module manual.
 
 This module implements cooperative SSL socket wrappers.
-On Python 2.6 and older it uses Python's native :mod:`ssl` module. On Python 2.5 and 2.4
+On Python 2.6 and newer it uses Python's native :mod:`ssl` module. On Python 2.5 and 2.4
 it requires `ssl package`_ to be installed.
 
 .. _`ssl package`: http://pypi.python.org/pypi/ssl
@@ -19,39 +19,41 @@ except AttributeError:
     _ssl = __ssl__._ssl2
 
 import sys
-from gevent.socket import socket, _fileobject, timeout, wait_read, wait_write, timeout_default
-from gevent.socket import error as socket_error
+import errno
+from gevent.socket import socket, _fileobject, wait_read, wait_write, timeout_default
+from gevent.socket import error as socket_error, EBADF
 
-__implements__ = ['SSLObject', 'wrap_socket', 'get_server_certificate', 'sslwrap_simple']
+__implements__ = ['SSLSocket',
+                  'wrap_socket',
+                  'get_server_certificate',
+                  'sslwrap_simple']
 
-__all__ = ['SSLError',
-           'CERT_NONE', 'CERT_OPTIONAL', 'CERT_REQUIRED',
-           'PROTOCOL_SSLv2', 'PROTOCOL_SSLv3', 'PROTOCOL_SSLv23', 'PROTOCOL_TLSv1', 'PROTOCOL_NOSSLv2',
-           'RAND_status', 'RAND_egd', 'RAND_add',
-           'SSL_ERROR_ZERO_RETURN',
-           'SSL_ERROR_WANT_READ',
-           'SSL_ERROR_WANT_WRITE',
-           'SSL_ERROR_WANT_X509_LOOKUP',
-           'SSL_ERROR_SYSCALL',
-           'SSL_ERROR_SSL',
-           'SSL_ERROR_WANT_CONNECT',
-           'SSL_ERROR_EOF',
-           'SSL_ERROR_INVALID_ERROR_CODE',
-           'cert_time_to_seconds',
-           'DER_cert_to_PEM_cert',
-           'PEM_cert_to_DER_cert',
-           'get_protocol_name']
+__imports__ = ['SSLError',
+               'RAND_status',
+               'RAND_egd',
+               'RAND_add',
+               'cert_time_to_seconds',
+               'get_protocol_name',
+               'DER_cert_to_PEM_cert',
+               'PEM_cert_to_DER_cert']
 
-for name in __all__:
+for name in __imports__[:]:
     try:
         value = getattr(__ssl__, name)
+        globals()[name] = value
     except AttributeError:
-        continue
-    globals()[name] = value
+        __imports__.remove(name)
+
+for name in dir(__ssl__):
+    if not name.startswith('_'):
+        value = getattr(__ssl__, name)
+        if isinstance(value, (int, long, basestring, tuple)):
+            globals()[name] = value
+            __imports__.append(name)
 
 del name, value
 
-__all__ += __implements__
+__all__ = __implements__ + __imports__
 
 
 class SSLSocket(socket):
@@ -60,11 +62,8 @@ class SSLSocket(socket):
                  server_side=False, cert_reqs=CERT_NONE,
                  ssl_version=PROTOCOL_SSLv23, ca_certs=None,
                  do_handshake_on_connect=True,
-                 suppress_ragged_eofs=True):
-        try:
-            sock = sock._sock
-        except AttributeError:
-            pass
+                 suppress_ragged_eofs=True,
+                 ciphers=None):
         socket.__init__(self, _sock=sock)
 
         if certfile and not keyfile:
@@ -72,26 +71,30 @@ class SSLSocket(socket):
         # see if it's connected
         try:
             socket.getpeername(self)
-        except socket_error:
+        except socket_error, e:
+            if e[0] != errno.ENOTCONN:
+                raise
             # no, no connection yet
             self._sslobj = None
         else:
             # yes, create the SSL object
-            self._sslobj = _ssl.sslwrap(self._sock, server_side,
-                                        keyfile, certfile,
-                                        cert_reqs, ssl_version, ca_certs)
+            if ciphers is None:
+                self._sslobj = _ssl.sslwrap(self._sock, server_side,
+                                            keyfile, certfile,
+                                            cert_reqs, ssl_version, ca_certs)
+            else:
+                self._sslobj = _ssl.sslwrap(self._sock, server_side,
+                                            keyfile, certfile,
+                                            cert_reqs, ssl_version, ca_certs,
+                                            ciphers)
             if do_handshake_on_connect:
-                timeout = self.gettimeout()
-                try:
-                    self.settimeout(None)
-                    self.do_handshake()
-                finally:
-                    self.settimeout(timeout)
+                self.do_handshake()
         self.keyfile = keyfile
         self.certfile = certfile
         self.cert_reqs = cert_reqs
         self.ssl_version = ssl_version
         self.ca_certs = ca_certs
+        self.ciphers = ciphers
         self.do_handshake_on_connect = do_handshake_on_connect
         self.suppress_ragged_eofs = suppress_ragged_eofs
         self._makefile_refs = 0
@@ -109,12 +112,23 @@ class SSLSocket(socket):
                     if self.timeout == 0.0:
                         raise
                     sys.exc_clear()
-                    wait_read(self.fileno(), timeout=self.timeout)
+                    try:
+                        wait_read(self.fileno(), timeout=self.timeout, timeout_exc=_SSLErrorReadTimeout, event=self._read_event)
+                    except socket_error, ex:
+                        if ex[0] == EBADF:
+                            return ''
+                        raise
                 elif ex.args[0] == SSL_ERROR_WANT_WRITE:
                     if self.timeout == 0.0:
                         raise
                     sys.exc_clear()
-                    wait_write(self.fileno(), timeout=self.timeout)
+                    try:
+                        # note: using _SSLErrorReadTimeout rather than _SSLErrorWriteTimeout below is intentional
+                        wait_write(self.fileno(), timeout=self.timeout, timeout_exc=_SSLErrorReadTimeout, event=self._write_event)
+                    except socket_error, ex:
+                        if ex[0] == EBADF:
+                            return ''
+                        raise
                 else:
                     raise
 
@@ -129,12 +143,22 @@ class SSLSocket(socket):
                     if self.timeout == 0.0:
                         raise
                     sys.exc_clear()
-                    wait_read(self.fileno(), timeout=self.timeout)
+                    try:
+                        wait_read(self.fileno(), timeout=self.timeout, timeout_exc=_SSLErrorWriteTimeout, event=self._read_event)
+                    except socket_error, ex:
+                        if ex[0] == EBADF:
+                            return 0
+                        raise
                 elif ex.args[0] == SSL_ERROR_WANT_WRITE:
                     if self.timeout == 0.0:
                         raise
                     sys.exc_clear()
-                    wait_write(self.fileno(), timeout=self.timeout)
+                    try:
+                        wait_write(self.fileno(), timeout=self.timeout, timeout_exc=_SSLErrorWriteTimeout, event=self._write_event)
+                    except socket_error, ex:
+                        if ex[0] == EBADF:
+                            return 0
+                        raise
                 else:
                     raise
 
@@ -165,14 +189,24 @@ class SSLSocket(socket):
                 except SSLError, x:
                     if x.args[0] == SSL_ERROR_WANT_READ:
                         if self.timeout == 0.0:
-                            raise timeout(str(x))
+                            return 0
                         sys.exc_clear()
-                        wait_read(self.fileno(), timeout=timeout)
+                        try:
+                            wait_read(self.fileno(), timeout=timeout, event=self._read_event)
+                        except socket_error, ex:
+                            if ex[0] == EBADF:
+                                return 0
+                            raise
                     elif x.args[0] == SSL_ERROR_WANT_WRITE:
                         if self.timeout == 0.0:
-                            raise timeout(str(x))
+                            return 0
                         sys.exc_clear()
-                        wait_write(self.fileno(), timeout=timeout)
+                        try:
+                            wait_write(self.fileno(), timeout=timeout, event=self._write_event)
+                        except socket_error, ex:
+                            if ex[0] == EBADF:
+                                return 0
+                            raise
                     else:
                         raise
                 else:
@@ -181,12 +215,12 @@ class SSLSocket(socket):
             return socket.send(self, data, flags, timeout)
     # is it possible for sendall() to send some data without encryption if another end shut down SSL?
 
-    def sendto(self, data, addr, flags=0):
+    def sendto(self, *args):
         if self._sslobj:
             raise ValueError("sendto not allowed on instances of %s" %
                              self.__class__)
         else:
-            return socket.sendto(self, data, addr, flags)
+            return socket.sendto(self, *args)
 
     def recv(self, buflen=1024, flags=0):
         if self._sslobj:
@@ -194,18 +228,8 @@ class SSLSocket(socket):
                 raise ValueError(
                     "non-zero flags not allowed in calls to recv() on %s" %
                     self.__class__)
-            while True:
-                try:
-                    return self.read(buflen)
-                except SSLError, x:
-                    if x.args[0] == SSL_ERROR_WANT_READ:
-                        sys.exc_clear()
-                        if self.timeout == 0.0:
-                            raise timeout(str(x))
-                        wait_read(self.fileno(), timeout=self.timeout)
-                        continue
-                    else:
-                        raise
+            # QQQ Shouldn't we wrap the SSL_WANT_READ errors as socket.timeout errors to match socket.recv's behavior?
+            return self.read(buflen)
         else:
             return socket.recv(self, buflen, flags)
 
@@ -229,27 +253,32 @@ class SSLSocket(socket):
                     if x.args[0] == SSL_ERROR_WANT_READ:
                         sys.exc_clear()
                         if self.timeout == 0.0:
-                            raise timeout(str(x))
-                        wait_read(self.fileno(), timeout=self.timeout)
+                            raise
+                        try:
+                            wait_read(self.fileno(), timeout=self.timeout, event=self._read_event)
+                        except socket_error, ex:
+                            if ex[0] == EBADF:
+                                return 0
+                            raise
                         continue
                     else:
                         raise
         else:
             return socket.recv_into(self, buffer, nbytes, flags)
 
-    def recvfrom(self, addr, buflen=1024, flags=0):
+    def recvfrom(self, *args):
         if self._sslobj:
             raise ValueError("recvfrom not allowed on instances of %s" %
                              self.__class__)
         else:
-            return socket.recvfrom(self, addr, buflen, flags)
+            return socket.recvfrom(self, *args)
 
-    def recvfrom_into(self, buffer, nbytes=None, flags=0):
+    def recvfrom_into(self, *args):
         if self._sslobj:
             raise ValueError("recvfrom_into not allowed on instances of %s" %
                              self.__class__)
         else:
-            return socket.recvfrom_into(self, buffer, nbytes, flags)
+            return socket.recvfrom_into(self, *args)
 
     def pending(self):
         if self._sslobj:
@@ -257,9 +286,39 @@ class SSLSocket(socket):
         else:
             return 0
 
+    def _sslobj_shutdown(self):
+        while True:
+            try:
+                return self._sslobj.shutdown()
+            except SSLError, ex:
+                if ex.args[0] == SSL_ERROR_EOF and self.suppress_ragged_eofs:
+                    return ''
+                elif ex.args[0] == SSL_ERROR_WANT_READ:
+                    if self.timeout == 0.0:
+                        raise
+                    sys.exc_clear()
+                    try:
+                        wait_read(self.fileno(), timeout=self.timeout, timeout_exc=_SSLErrorReadTimeout, event=self._read_event)
+                    except socket_error, ex:
+                        if ex[0] == EBADF:
+                            return ''
+                        raise
+                elif ex.args[0] == SSL_ERROR_WANT_WRITE:
+                    if self.timeout == 0.0:
+                        raise
+                    sys.exc_clear()
+                    try:
+                        wait_write(self.fileno(), timeout=self.timeout, timeout_exc=_SSLErrorWriteTimeout, event=self._write_event)
+                    except socket_error, ex:
+                        if ex[0] == EBADF:
+                            return ''
+                        raise
+                else:
+                    raise
+
     def unwrap(self):
         if self._sslobj:
-            s = self._sslobj.shutdown()
+            s = self._sslobj_shutdown()
             self._sslobj = None
             return socket(_sock=s)
         else:
@@ -286,12 +345,12 @@ class SSLSocket(socket):
                     if self.timeout == 0.0:
                         raise
                     sys.exc_clear()
-                    wait_read(self.fileno(), timeout=self.timeout)
+                    wait_read(self.fileno(), timeout=self.timeout, timeout_exc=_SSLErrorHandshakeTimeout, event=self._read_event)
                 elif ex.args[0] == SSL_ERROR_WANT_WRITE:
                     if self.timeout == 0.0:
                         raise
                     sys.exc_clear()
-                    wait_write(self.fileno(), timeout=self.timeout)
+                    wait_write(self.fileno(), timeout=self.timeout, timeout_exc=_SSLErrorHandshakeTimeout, event=self._write_event)
                 else:
                     raise
 
@@ -303,9 +362,14 @@ class SSLSocket(socket):
         if self._sslobj:
             raise ValueError("attempt to connect already-connected SSLSocket!")
         socket.connect(self, addr)
-        self._sslobj = _ssl.sslwrap(self._sock, False, self.keyfile, self.certfile,
-                                    self.cert_reqs, self.ssl_version,
-                                    self.ca_certs)
+        if self.ciphers is None:
+            self._sslobj = _ssl.sslwrap(self._sock, False, self.keyfile, self.certfile,
+                                        self.cert_reqs, self.ssl_version,
+                                        self.ca_certs)
+        else:
+            self._sslobj = _ssl.sslwrap(self._sock, False, self.keyfile, self.certfile,
+                                        self.cert_reqs, self.ssl_version,
+                                        self.ca_certs, self.ciphers)
         if self.do_handshake_on_connect:
             self.do_handshake()
 
@@ -322,7 +386,8 @@ class SSLSocket(socket):
                           ssl_version=self.ssl_version,
                           ca_certs=self.ca_certs,
                           do_handshake_on_connect=self.do_handshake_on_connect,
-                          suppress_ragged_eofs=self.suppress_ragged_eofs),
+                          suppress_ragged_eofs=self.suppress_ragged_eofs,
+                          ciphers=self.ciphers),
                 addr)
 
     def makefile(self, mode='r', bufsize=-1):
@@ -330,23 +395,31 @@ class SSLSocket(socket):
         works with the SSL connection.  Just use the code
         from the socket module."""
         self._makefile_refs += 1
-        return _fileobject(self, mode, bufsize)
+        # close=True so as to decrement the reference count when done with
+        # the file-like object.
+        return _fileobject(self, mode, bufsize, close=True)
+
+
+_SSLErrorReadTimeout = SSLError('The read operation timed out')
+_SSLErrorWriteTimeout = SSLError('The write operation timed out')
+_SSLErrorHandshakeTimeout = SSLError('The handshake operation timed out')
 
 
 def wrap_socket(sock, keyfile=None, certfile=None,
                 server_side=False, cert_reqs=CERT_NONE,
                 ssl_version=PROTOCOL_SSLv23, ca_certs=None,
                 do_handshake_on_connect=True,
-                suppress_ragged_eofs=True):
+                suppress_ragged_eofs=True, ciphers=None):
     """Create a new :class:`SSLSocket` instance."""
     return SSLSocket(sock, keyfile=keyfile, certfile=certfile,
                      server_side=server_side, cert_reqs=cert_reqs,
                      ssl_version=ssl_version, ca_certs=ca_certs,
                      do_handshake_on_connect=do_handshake_on_connect,
-                     suppress_ragged_eofs=suppress_ragged_eofs)
+                     suppress_ragged_eofs=suppress_ragged_eofs,
+                     ciphers=ciphers)
 
 
-def get_server_certificate (addr, ssl_version=PROTOCOL_SSLv3, ca_certs=None):
+def get_server_certificate(addr, ssl_version=PROTOCOL_SSLv3, ca_certs=None):
     """Retrieve the certificate from the server at the specified address,
     and return it as a PEM-encoded string.
     If 'ca_certs' is specified, validate the server cert against it.
@@ -370,4 +443,3 @@ def sslwrap_simple(sock, keyfile=None, certfile=None):
     for compability with Python 2.5 and earlier.  Will disappear in
     Python 3.0."""
     return SSLSocket(sock, keyfile, certfile)
-

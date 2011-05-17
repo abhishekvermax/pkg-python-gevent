@@ -3,7 +3,7 @@
 import sys
 import traceback
 from gevent import core
-from gevent.hub import greenlet, getcurrent, get_hub, GreenletExit, Waiter, kill
+from gevent.hub import greenlet, getcurrent, get_hub, GreenletExit, Waiter
 from gevent.timeout import Timeout
 
 
@@ -85,17 +85,7 @@ class GreenletLink(object):
                 error = LinkedCompleted(source)
         else:
             error = LinkedFailed(source)
-        current = getcurrent()
-        greenlet = self.greenlet
-        if current is greenlet:
-            greenlet.throw(error)
-        elif current is get_hub():
-            try:
-                greenlet.throw(error)
-            except:
-                traceback.print_exc()
-        else:
-            kill(self.greenlet, error)
+        self.greenlet.throw(error)
 
     def __hash__(self):
         return hash(self.greenlet)
@@ -139,18 +129,13 @@ class FailureGreenletLink(GreenletLink):
 class Greenlet(greenlet):
     """A light-weight cooperatively-scheduled execution unit."""
 
-    args = ()
-    kwargs = {}
-
     def __init__(self, run=None, *args, **kwargs):
         greenlet.__init__(self, parent=get_hub())
         if run is not None:
             self._run = run
-        if args:
-            self.args = args
-        if kwargs:
-            self.kwargs = kwargs
-        self._links = set()
+        self.args = args
+        self.kwargs = kwargs
+        self._links = []
         self.value = None
         self._exception = _NONE
         self._notifier = None
@@ -228,7 +213,7 @@ class Greenlet(greenlet):
                 # the result was not set and the links weren't notified. let's do it here.
                 # checking that self.dead is true is essential, because the exception raised by
                 # throw() could have been cancelled by the greenlet's function.
-                if len(args)==1:
+                if len(args) == 1:
                     arg = args[0]
                     #if isinstance(arg, type):
                     if type(arg) is type(Exception):
@@ -293,7 +278,7 @@ class Greenlet(greenlet):
         If block is ``True`` (the default), wait until the greenlet dies or the optional timeout expires.
         If block is ``False``, the current greenlet is not unscheduled.
 
-        The function always returns ``None`` and never raises an errir.
+        The function always returns ``None`` and never raises an error.
 
         `Changed in version 0.13.0:` *block* is now ``True`` by default.
         """
@@ -304,7 +289,7 @@ class Greenlet(greenlet):
             waiter = Waiter()
             core.active_event(_kill, self, exception, waiter)
             if block:
-                waiter.wait()
+                waiter.get()
                 self.join(timeout)
         # it should be OK to use kill() in finally or kill a greenlet from more than one place;
         # thus it should not raise when the greenlet is already killed (= not started)
@@ -327,7 +312,7 @@ class Greenlet(greenlet):
             try:
                 t = Timeout.start_new(timeout)
                 try:
-                    result = get_hub().switch()
+                    result = self.parent.switch()
                     assert result is self, 'Invalid switch into Greenlet.get(): %r' % (result, )
                 finally:
                     t.cancel()
@@ -359,7 +344,7 @@ class Greenlet(greenlet):
             try:
                 t = Timeout.start_new(timeout)
                 try:
-                    result = get_hub().switch()
+                    result = self.parent.switch()
                     assert result is self, 'Invalid switch into Greenlet.join(): %r' % (result, )
                 finally:
                     t.cancel()
@@ -419,7 +404,7 @@ class Greenlet(greenlet):
         """
         if not callable(callback):
             raise TypeError('Expected callable: %r' % (callback, ))
-        self._links.add(callback)
+        self._links.append(callback)
         if self.ready() and self._notifier is None:
             self._notifier = core.active_event(self._notify_links)
 
@@ -461,7 +446,10 @@ class Greenlet(greenlet):
             receiver = getcurrent()
         # discarding greenlets when we have GreenletLink instances in _links works, because
         # a GreenletLink instance pretends to be a greenlet, hash-wise and eq-wise
-        self._links.discard(receiver)
+        try:
+            self._links.remove(receiver)
+        except ValueError:
+            pass
 
     def link_value(self, receiver=None, GreenletLink=SuccessGreenletLink, SpawnedLink=SuccessSpawnedLink):
         """Like :meth:`link` but *receiver* is only notified when the greenlet has completed successfully"""
@@ -550,7 +538,7 @@ def killall(greenlets, exception=GreenletExit, block=True, timeout=None):
         if block:
             t = Timeout.start_new(timeout)
             try:
-                alive = waiter.wait()
+                alive = waiter.get()
                 if alive:
                     joinall(alive, raise_error=False)
             finally:
@@ -614,4 +602,3 @@ def getfuncname(func):
 
 
 _NONE = Exception("Neither exception nor value")
-

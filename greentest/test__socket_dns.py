@@ -1,4 +1,5 @@
 #!/usr/bin/python
+# -*- coding: utf-8 -*-
 import sys
 import re
 import greentest
@@ -7,16 +8,30 @@ from gevent.socket import *
 
 
 ACCEPTED_GAIERROR_MISMATCH = {
-    "gaierror(-5, 'No address associated with hostname')": "DNSError(3, 'name does not exist')"
+    "gaierror(-5, 'No address associated with hostname')":
+    ("DNSError(3, 'name does not exist')", "DNSError(66, 'unknown')"),
 }
 
 assert gaierror is real_socket.gaierror
 assert error is real_socket.error
 
 VERBOSE = '-v' in sys.argv
+IGNORE_ERRORS = '--ignore' in sys.argv
+DEBUG = '-d' in sys.argv
+for arg in ['--ignore', '-d']:
+    try:
+        sys.argv.remove(arg)
+    except ValueError:
+        pass
 
 
 class TestCase(greentest.TestCase):
+    __timeout__ = 30
+
+    if IGNORE_ERRORS:
+        def assertEqual(self, a, b):
+            if a != b:
+                print 'ERROR: %r != %r' % (a, b)
 
     def _test(self, hostname, check_ip=None):
         self._test_gethostbyname(hostname, check_ip=check_ip)
@@ -28,12 +43,16 @@ class TestCase(greentest.TestCase):
                 print 'real_socket.gethostbyname(%r)' % (hostname, )
             real_ip = real_socket.gethostbyname(hostname)
         except Exception, ex:
+            if DEBUG:
+                raise
             real_ip = ex
         try:
             if VERBOSE:
                 print 'gevent.socket.gethostbyname(%r)' % (hostname, )
             ip = gethostbyname(hostname)
         except Exception, ex:
+            if DEBUG:
+                raise
             ip = ex
         if self.equal(real_ip, ip):
             return ip
@@ -42,7 +61,7 @@ class TestCase(greentest.TestCase):
             self.assertEqual(check_ip, ip)
         return ip
 
-    PORTS = [80, 0, 53]
+    PORTS = [80, 0, 53, 'http']
     getaddrinfo_args = [(),
                         (AF_UNSPEC, ),
                         (AF_UNSPEC, SOCK_STREAM, 0, 0),
@@ -52,25 +71,33 @@ class TestCase(greentest.TestCase):
                         (AF_UNSPEC, SOCK_STREAM, 6),
                         (AF_INET, SOCK_DGRAM, 17)]
 
-
     def _test_getaddrinfo(self, hostname):
         for port in self.PORTS:
             for args in self.getaddrinfo_args:
                 if VERBOSE:
+                    print
                     print 'real_socket.getaddrinfo(%r, %r, %r)' % (hostname, port, args)
                 try:
                     real_ip = real_socket.getaddrinfo(hostname, port, *args)
+                    if VERBOSE:
+                        print '    returned %r' % (real_ip, )
                 except Exception, ex:
+                    if DEBUG:
+                        raise
                     real_ip = ex
                 if VERBOSE:
                     print 'gevent.socket.getaddrinfo(%r, %r, %r)' % (hostname, port, args)
                 try:
                     ip = getaddrinfo(hostname, port, *args)
+                    if VERBOSE:
+                        print '    returned %r' % (ip, )
                 except Exception, ex:
+                    if DEBUG:
+                        raise
                     ip = ex
                 if not self.equal(real_ip, ip):
                     args_str = ', '.join(repr(x) for x in (hostname, port) + args)
-                    print 'WARNING: getaddrinfo(%s):\n    %r\n != %r' % (args_str, real_ip, ip)
+                    print 'WARNING: getaddrinfo(%s):\n    %r    (stdlib)\n != %r    (gevent)' % (args_str, real_ip, ip)
         # QQQ switch_expected becomes useless when a bunch of unrelated tests are merged
         #     into a single one like above. Generate individual test cases instead?
 
@@ -80,7 +107,7 @@ class TestCase(greentest.TestCase):
         if isinstance(a, Exception) and isinstance(b, Exception):
             if repr(a) == repr(b):
                 return True
-            if ACCEPTED_GAIERROR_MISMATCH.get(repr(a), repr(b))==repr(b):
+            if repr(b) in ACCEPTED_GAIERROR_MISMATCH.get(repr(a), (repr(b), )):
                 return True
 
     def checkEqual(self, a, b):
@@ -152,6 +179,26 @@ class TestRemote(TestCase):
         self._test('sdfsdfgu5e66098032453245wfdggd.com')
 
 
+class TestInternational(TestCase):
+
+    def test(self):
+        self._test(u'президент.рф')
+
+
+class TestIPv6(TestCase):
+
+    def test(self):
+        #self.PORTS = ['http']
+        #self.getaddrinfo_args = [(), (AF_UNSPEC, ), (AF_INET, ), (AF_INET6, )]
+        self._test('aaaa.test-ipv6.com')
+
+
+class TestBadPort(TestCase):
+
+    def test(self):
+        self.PORTS = ['xxxxxx']
+        self._test('www.google.com')
+
+
 if __name__ == '__main__':
     greentest.main()
-

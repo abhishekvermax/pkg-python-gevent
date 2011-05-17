@@ -21,14 +21,16 @@
 
 import greentest
 import gevent
-from gevent import core, util, socket
+from gevent import util, socket
 
 DELAY = 0.1
+
 
 class Test(greentest.TestCase):
 
     def test_killing_dormant(self):
         state = []
+
         def test():
             try:
                 state.append('start')
@@ -38,10 +40,11 @@ class Test(greentest.TestCase):
                 # catching GreenletExit
                 pass
             state.append('finished')
+
         g = gevent.spawn(test)
-        gevent.sleep(DELAY/2)
+        gevent.sleep(DELAY / 2)
         assert state == ['start'], state
-        g.kill(block=True)
+        g.kill()
         # will not get there, unless switching is explicitly scheduled by kill
         assert state == ['start', 'except', 'finished'], state
 
@@ -52,53 +55,53 @@ class Test(greentest.TestCase):
 
     def test_sleep_invalid_switch(self):
         p = gevent.spawn(util.wrap_errors(AssertionError, gevent.sleep), 2)
-        gevent.spawn(p.switch, None)
+        switcher = gevent.spawn(p.switch, None)
         result = p.get()
         assert isinstance(result, AssertionError), result
         assert 'Invalid switch' in str(result), repr(str(result))
+        switcher.kill()
 
     def test_wait_read_invalid_switch(self):
         p = gevent.spawn(util.wrap_errors(AssertionError, socket.wait_read), 0)
-        gevent.spawn(p.switch, None)
+        switcher = gevent.spawn(p.switch, None)
         result = p.get()
         assert isinstance(result, AssertionError), result
         assert 'Invalid switch' in str(result), repr(str(result))
+        switcher.kill()
 
     def test_wait_write_invalid_switch(self):
         p = gevent.spawn(util.wrap_errors(AssertionError, socket.wait_write), 0)
-        gevent.spawn(p.switch, None)
+        switcher = gevent.spawn(p.switch, None)
         result = p.get()
         assert isinstance(result, AssertionError), result
         assert 'Invalid switch' in str(result), repr(str(result))
+        switcher.kill()
 
 
 class TestTimers(greentest.TestCase):
 
-    def setUp(self):
-        greentest.TestCase.setUp(self)
-        self.lst = [1]
-
     def test_timer_fired(self):
+        lst = [1]
 
         def func():
-            core.timer(0.01, self.lst.pop)
+            gevent.spawn_later(0.01, lst.pop)
             gevent.sleep(0.02)
 
         gevent.spawn(func)
-        assert self.lst == [1], self.lst
+        assert lst == [1], lst
         gevent.sleep(0.03)
-        assert self.lst == [], self.lst
+        assert lst == [], lst
 
     def test_spawn_is_not_cancelled(self):
+        lst = [1]
 
         def func():
-            gevent.spawn(self.lst.pop)
+            gevent.spawn(lst.pop)
             # exiting immediatelly, but self.lst.pop must be called
         gevent.spawn(func)
         gevent.sleep(0.01)
-        assert self.lst == [], self.lst
+        assert lst == [], lst
 
 
-if __name__=='__main__':
+if __name__ == '__main__':
     greentest.main()
-

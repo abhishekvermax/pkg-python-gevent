@@ -8,7 +8,11 @@ non-standard location, use the options to point to the right dirs:
 
     -IPATH            add include PATH
     -LPATH            add library PATH
-   --libevent PATH    use libevent from PATH (implies -IPATH -IPATH/include -LPATH/.libs)
+   --libevent PATH    use libevent from PATH
+       If configure and make have been run in PATH, this implies
+      -IPATH -IPATH/include -LPATH/.libs
+      Otherwise setup.py will run configure and make and link
+      statically with libevent.
 """
 
 import sys
@@ -16,12 +20,13 @@ import os
 import re
 import traceback
 import glob
-from distutils.command import build_ext
-if 'bdist_egg' in sys.argv:
-    from setuptools import Extension, setup
-else:
-    from distutils.core import Extension, setup
 from os.path import join, isdir, abspath, basename, exists, dirname
+
+try:
+    from setuptools import Extension, setup
+except ImportError:
+    from distutils.core import Extension, setup
+from distutils.command import build_ext
 
 __version__ = re.search("__version__\s*=\s*'(.*)'", open('gevent/__init__.py').read(), re.M).group(1)
 assert __version__
@@ -30,39 +35,45 @@ assert __version__
 include_dirs = []                 # specified by -I
 library_dirs = []                 # specified by -L
 libevent_source_path = None       # specified by --libevent
-VERBOSE = '-v' in sys.argv
 extra_compile_args = []
 sources = ['gevent/core.c']
 libraries = []
-extra_objects = []
 
 
-cmdclass = {}
+def run_cython(cython_command='cython'):
+    sources = glob.glob('gevent/*.pyx') + glob.glob('gevent/*.pxi')
+    if not sources:
+        if not os.path.exists('gevent/core.c'):
+            print >> sys.stderr, 'Could not find gevent/core.c'
+    if os.path.exists('gevent/core.c'):
+        core_c_mtime = os.stat('gevent/core.c').st_mtime
+        changed = [filename for filename in sources if (os.stat(filename).st_mtime - core_c_mtime) > 1]
+        if not changed:
+            return
+        print >> sys.stderr, 'Running %s (changed: %s)' % (cython_command, ', '.join(changed))
+    else:
+        print >> sys.stderr, 'Running %s' % cython_command
+    cython_result = os.system('%s gevent/core.pyx' % cython_command)
+    if cython_result:
+        if os.system('%s -V 2> %s' % (cython_command, os.devnull)):
+            # there's no cython in the system
+            print >> sys.stderr, 'No cython found, cannot rebuild core.c'
+            return
+        sys.exit(1)
+
+
 class my_build_ext(build_ext.build_ext):
+    user_options = (build_ext.build_ext.user_options
+                    + [("cython=", None, "path to the cython executable")])
 
-    def compile_cython(self):
-        sources = glob.glob('gevent/*.pyx') + glob.glob('gevent/*.pxi')
-        if not sources:
-            if not os.path.exists('gevent/core.c'):
-                print >> sys.stderr, 'Could not find gevent/core.c'
-        if os.path.exists('gevent/core.c'):
-            core_c_mtime = os.stat('gevent/core.c').st_mtime
-            changed = [filename for filename in sources if (os.stat(filename).st_mtime - core_c_mtime) > 1]
-            if not changed:
-                return
-            print >> sys.stderr, 'Running cython (changed: %s)' % ', '.join(changed)
-        else:
-            print >> sys.stderr, 'Running cython'
-        cython_result = os.system('cython gevent/core.pyx')
-        if cython_result:
-            if os.system('cython -V 2> %s' % os.devnull):
-                # there's no cython in the system
-                print >> sys.stderr, 'No cython found, cannot rebuild core.c'
-                return
-            sys.exit(1)
+    def initialize_options(self):
+        build_ext.build_ext.initialize_options(self)
+        self.cython = "cython"
 
     def build_extension(self, ext):
-        self.compile_cython()
+        compile_libevent(self)
+        if self.cython:
+            run_cython(self.cython)
         result = build_ext.build_ext.build_extension(self, ext)
         # hack: create a symlink from build/../core.so to gevent/core.so
         # to prevent "ImportError: cannot import name core" failures
@@ -91,7 +102,72 @@ class my_build_ext(build_ext.build_ext):
             traceback.print_exc()
         return result
 
-cmdclass = {'build_ext': my_build_ext}
+
+def mysystem(cmd):
+    err = os.system(cmd)
+    if err:
+        sys.exit("running %r failed" % cmd)
+
+
+def compile_libevent(build):
+    sdir = libevent_source_path
+    if not sdir:
+        return
+
+    from distutils import sysconfig
+
+    configure = os.path.abspath(os.path.join(sdir, "configure"))
+    addlibs = []
+    bdir = os.path.join(build.build_temp, "libevent")
+    if not os.path.isdir(bdir):
+        os.makedirs(bdir)
+
+    cwd = os.getcwd()
+    os.chdir(bdir)
+    try:
+        if "CC" not in os.environ:
+            cc = sysconfig.get_config_var("CC")
+            if cc:
+                os.environ["CC"] = cc
+
+            archflags = sysconfig.get_config_var("ARCHFLAGS")
+            if archflags:
+                os.environ["AM_CFLAGS"] = archflags
+
+        if not exists("./config.status"):
+            mysystem("%s --with-pic --disable-shared --disable-dependency-tracking" % configure)
+        if "bsd" in sys.platform:
+            mysystem("gmake")
+        else:
+            mysystem("make")
+
+        for line in open("Makefile"):
+            if line.startswith("LIBS = "):
+                addlibs = [x[2:] for x in line[len("LIBS = "):].strip().split() if x.startswith("-l")]
+    finally:
+        os.chdir(cwd)
+
+    if build is None:
+        return
+
+    if build.include_dirs is None:
+        build.include_dirs = []
+    if build.library_dirs is None:
+        build.library_dirs = []
+    # bdir is needed for event-config.h
+    build.include_dirs[:0] = [bdir, "%s/include" % bdir, sdir, "%s/include" % sdir]
+    build.library_dirs[:0] = ["%s/.libs" % bdir]
+    build.libraries.extend(addlibs)
+
+    cc = build.compiler
+    if sys.platform == "darwin":
+        # stupid apple: http://developer.apple.com/mac/library/qa/qa2006/qa1393.html
+        cc.linker_so += ['-Wl,-search_paths_first']
+        cc.linker_exe += ['-Wl,-search_paths_first']
+
+    cc.set_include_dirs(build.include_dirs)
+    cc.set_library_dirs(build.library_dirs)
+    cc.set_libraries(build.libraries)
 
 
 def check_dir(path, must_exist):
@@ -113,6 +189,18 @@ def add_library_dir(path, must_exist=True):
         library_dirs.append(path)
 
 
+def enable_libevent_source_path():
+    add_include_dir(join(libevent_source_path, 'include'), must_exist=False)
+    add_include_dir(libevent_source_path, must_exist=False)
+    add_library_dir(join(libevent_source_path, '.libs'), must_exist=False)
+    if sys.platform == 'win32':
+        add_include_dir(join(libevent_source_path, 'compat'), must_exist=False)
+        add_include_dir(join(libevent_source_path, 'WIN32-Code'), must_exist=False)
+
+    global compile_libevent
+    compile_libevent = lambda *a: None
+
+
 # parse options: -I NAME / -INAME / -L NAME / -LNAME / --libevent DIR
 # we're cutting out options from sys.path instead of using optparse
 # so that these option can co-exists with distutils' options
@@ -132,17 +220,14 @@ while i < len(sys.argv):
     elif arg == '--libevent':
         del sys.argv[i]
         libevent_source_path = sys.argv[i]
-        add_include_dir(join(libevent_source_path, 'include'), must_exist=False)
-        add_include_dir(libevent_source_path, must_exist=False)
-        add_library_dir(join(libevent_source_path, '.libs'), must_exist=False)
-        if sys.platform == 'win32':
-            add_include_dir(join(libevent_source_path, 'compat'), must_exist=False)
-            add_include_dir(join(libevent_source_path, 'WIN32-Code'), must_exist=False)
     else:
         i += 1
         continue
     del sys.argv[i]
 
+if libevent_source_path is None and os.path.isdir("libevent-src"):
+    libevent_source_path = "libevent-src"
+    print "using libevent sources in libevent-src"
 
 # sources used when building on windows; this includes sources of both libevent-1.4
 # and libevent-2 combined, but will filter out the files that do not exist
@@ -180,11 +265,11 @@ else:
     if sys.platform == 'win32':
         if not libevent_source_path:
             sys.exit('Please provide path to libevent source with --libevent DIR')
-        extra_compile_args += ['-DHAVE_CONFIG_H']
-        extra_compile_args += ['-DWIN32']
+        enable_libevent_source_path()
+        extra_compile_args += ['-DHAVE_CONFIG_H', '-DWIN32']
         libraries = ['wsock32', 'advapi32', 'ws2_32', 'shell32']
-        include_dirs.extend([ join(libevent_source_path, 'WIN32-Code'),
-                              join(libevent_source_path, 'compat') ])
+        include_dirs.extend([join(libevent_source_path, 'WIN32-Code'),
+                             join(libevent_source_path, 'compat')])
         libevent_sources = [join(libevent_source_path, filename) for filename in libevent_sources]
         libevent_sources = [filename for filename in libevent_sources if exists(filename)]
         if not libevent_sources:
@@ -193,39 +278,49 @@ else:
             sources.append(filename)
     else:
         libraries = ['event']
-
+        if (libevent_source_path
+            and (exists(join(libevent_source_path, ".libs"))
+                 or not exists(join(libevent_source_path, "configure")))):
+            enable_libevent_source_path()
 
 gevent_core = Extension(name='gevent.core',
                         sources=sources,
                         include_dirs=include_dirs,
                         library_dirs=library_dirs,
                         libraries=libraries,
-                        extra_objects=extra_objects,
                         extra_compile_args=extra_compile_args)
+
 
 def read(name):
     return open(join(dirname(__file__), name)).read()
 
 
 if __name__ == '__main__':
-    setup(
-        name='gevent',
-        version=__version__,
-        description='Python network library that uses greenlet and libevent for easy and scalable concurrency',
-        long_description=read('README.rst'),
-        author='Denis Bilenko',
-        author_email='denis.bilenko@gmail.com',
-        url='http://www.gevent.org/',
-        packages=['gevent'],
-        ext_modules=[gevent_core],
-        cmdclass=cmdclass,
-        classifiers=[
-        "License :: OSI Approved :: MIT License",
-        "Programming Language :: Python",
-        "Operating System :: MacOS :: MacOS X",
-        "Operating System :: POSIX",
-        "Operating System :: Microsoft :: Windows",
-        "Topic :: Internet",
-        "Topic :: Software Development :: Libraries :: Python Modules",
-        "Intended Audience :: Developers",
-        "Development Status :: 4 - Beta"])
+    if sys.argv[1:] == ['cython']:
+        run_cython()
+    else:
+        setup(
+            name='gevent',
+            version=__version__,
+            description='Python network library that uses greenlet and libevent for easy and scalable concurrency',
+            long_description=read('README.rst'),
+            author='Denis Bilenko',
+            author_email='denis.bilenko@gmail.com',
+            url='http://www.gevent.org/',
+            packages=['gevent'],
+            ext_modules=[gevent_core],
+            cmdclass={'build_ext': my_build_ext},
+            install_requires=['greenlet'],
+            classifiers=[
+            "License :: OSI Approved :: MIT License",
+            "Programming Language :: Python :: 2.4",
+            "Programming Language :: Python :: 2.5",
+            "Programming Language :: Python :: 2.6",
+            "Programming Language :: Python :: 2.7",
+            "Operating System :: MacOS :: MacOS X",
+            "Operating System :: POSIX",
+            "Operating System :: Microsoft :: Windows",
+            "Topic :: Internet",
+            "Topic :: Software Development :: Libraries :: Python Modules",
+            "Intended Audience :: Developers",
+            "Development Status :: 4 - Beta"])

@@ -21,6 +21,9 @@ class ChatRoom(object):
 
     def message_new(self, request):
         name = request.META.get('REMOTE_ADDR') or 'Anonymous'
+        forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        if forwarded_for and name == '127.0.0.1':
+            name = forwarded_for
         msg = create_message(name, request.POST['body'])
         self.cache.append(msg)
         if len(self.cache) > self.cache_size:
@@ -37,7 +40,7 @@ class ChatRoom(object):
         try:
             for index, m in enumerate(self.cache):
                 if m['id'] == cursor:
-                    return json_response({'messages': self.cache[index+1:]})
+                    return json_response({'messages': self.cache[index + 1:]})
             return json_response({'messages': self.cache})
         finally:
             if self.cache:
@@ -60,4 +63,3 @@ def create_message(from_, body):
 def json_response(value, **kwargs):
     kwargs.setdefault('content_type', 'text/javascript; charset=UTF-8')
     return HttpResponse(simplejson.dumps(value), **kwargs)
-

@@ -11,8 +11,6 @@ in the database logged with the result 'TIMEOUT'.
 
 The --db option, when provided, specifies sqlite3 database that holds the test results.
 By default 'testresults.sqlite3' is used in the current directory.
-If the a mercurial repository is detected and the current working copy is "dirty", that is,
-has uncommited changes, then '/tmp/testresults.sqlite3' is used.
 
 The results are stored in the following 2 tables:
 
@@ -39,7 +37,7 @@ one will be selected if not provided.
 DEFAULT_TIMEOUT = 60
 
 # the number of bytes of output that is recorded; the rest is thrown away
-OUTPUT_LIMIT = 15*1024
+OUTPUT_LIMIT = 50000
 
 ignore_tracebacks = ['ExpectedException', 'test_support.TestSkipped', 'test.test_support.TestSkipped']
 
@@ -53,10 +51,12 @@ import platform
 
 try:
     import sqlite3
-except ImportError:
+except ImportError, ex:
+    sys.stderr.write('Failed to import sqlite3: %s\n' % ex)
     try:
         import pysqlite2.dbapi2 as sqlite3
-    except ImportError:
+    except ImportError, ex:
+        sys.stderr.write('Failed to import pysqlite2.dbapi2: %s\n' % ex)
         sqlite3 = None
 
 _column_types = {'time': 'real'}
@@ -170,11 +170,6 @@ def get_libevent_version():
     return libevent_version
 
 
-def get_libevent_method():
-    from gevent import core
-    return core.get_method()
-
-
 def get_tempnam():
     import warnings
     warnings.filterwarnings('ignore', 'tempnam is a potential security risk to your program')
@@ -186,36 +181,34 @@ def get_tempnam():
 
 
 def run_tests(options, args):
-    if len(args) != 1:
-        sys.exit('--record requires exactly one test module to run')
     arg = args[0]
     module_name = arg
     if module_name.endswith('.py'):
         module_name = module_name[:-3]
+
     class _runner(object):
+
         def __new__(cls, *args, **kawrgs):
             return DatabaseTestRunner(database_path=options.db, runid=options.runid, module_name=module_name, verbosity=options.verbosity)
+
     if options.db:
         import unittest
         unittest.TextTestRunner = _runner
         import test_support
         test_support.BasicTestRunner = _runner
+
+    sys.argv = args
+    globals()['__file__'] = arg
+
     if os.path.exists(arg):
-        sys.argv = args
-        saved_globals = {'__file__': __file__}
-        try:
-            globals()['__file__'] = arg
-            # QQQ this makes tests reported as if they are from __main__ and screws up warnings location
-            execfile(arg, globals())
-        finally:
-            globals().update(saved_globals)
+        execfile(arg, globals())
     else:
         test = defaultTestLoader.loadTestsFromName(arg)
         result = _runner().run(test)
         sys.exit(not result.wasSuccessful())
 
 
-def run_subprocess(arg, options):
+def run_subprocess(args, options):
     from threading import Timer
     from mysubprocess import Popen, PIPE, STDOUT
 
@@ -224,7 +217,7 @@ def run_subprocess(arg, options):
                   '--verbosity', options.verbosity]
     if options.db:
         popen_args += ['--db', options.db]
-    popen_args += [arg]
+    popen_args += args
     popen_args = [str(x) for x in popen_args]
     if options.capture:
         popen = Popen(popen_args, stdout=PIPE, stderr=STDOUT, shell=False)
@@ -235,7 +228,7 @@ def run_subprocess(arg, options):
 
     def killer():
         retcode.append('TIMEOUT')
-        print >> sys.stderr, 'Killing %s (%s) because of timeout' % (popen.pid, arg)
+        print >> sys.stderr, 'Killing %s (%s) because of timeout' % (popen.pid, args)
         popen.kill()
 
     timeout = Timer(options.timeout, killer)
@@ -260,17 +253,17 @@ def run_subprocess(arg, options):
     finally:
         timeout.cancel()
     # QQQ compensating for run_tests' screw up
-    module_name = arg
+    module_name = args[0]
     if module_name.endswith('.py'):
         module_name = module_name[:-3]
     output = output.replace(' (__main__.', ' (' + module_name + '.')
     return retcode[0], output, output_printed
 
 
-def spawn_subprocess(arg, options, base_params):
+def spawn_subprocess(args, options, base_params):
     success = False
     if options.db:
-        module_name = arg
+        module_name = args[0]
         if module_name.endswith('.py'):
             module_name = module_name[:-3]
         from datetime import datetime
@@ -279,24 +272,25 @@ def spawn_subprocess(arg, options, base_params):
                        'test': module_name})
         row_id = store_record(options.db, 'test', params)
         params['id'] = row_id
-    retcode, output, output_printed = run_subprocess(arg, options)
+    retcode, output, output_printed = run_subprocess(args, options)
     if len(output) > OUTPUT_LIMIT:
-        output = output[:OUTPUT_LIMIT] + '<AbridgedOutputWarning>'
+        warn = '<AbridgedOutputWarning>'
+        output = output[:OUTPUT_LIMIT - len(warn)] + warn
     if retcode:
         if retcode == 1 and 'test_support.TestSkipped' in output:
             pass
         else:
             if not output_printed and options.verbosity >= -1:
                 sys.stdout.write(output)
-            print '%s failed with code %s' % (arg, retcode)
+            print '%s failed with code %s' % (' '.join(args), retcode)
     elif retcode == 0:
         if not output_printed and options.verbosity >= 1:
             sys.stdout.write(output)
         if options.verbosity >= 0:
-            print '%s passed' % arg
+            print '%s passed' % ' '.join(args)
         success = True
     else:
-        print '%s timed out' % arg
+        print '%s timed out' % ' '.join(args)
     if options.db:
         params['output'] = output
         params['retcode'] = retcode
@@ -309,14 +303,19 @@ def spawn_subprocesses(options, args):
               'python': '%s.%s.%s' % sys.version_info[:3],
               'changeset': get_changeset(),
               'libevent_version': get_libevent_version(),
-              'libevent_method': get_libevent_method(),
               'uname': platform.uname()[0],
               'retcode': 'TIMEOUT'}
     success = True
     if not args:
         args = glob.glob('test_*.py')
         args.remove('test_support.py')
+    real_args = []
     for arg in args:
+        if os.path.exists(arg):
+            real_args.append([arg])
+        else:
+            real_args[-1].append(arg)
+    for arg in real_args:
         try:
             success = spawn_subprocess(arg, options, params) and success
         except Exception:
@@ -356,8 +355,6 @@ def get_failed_testcases(cursor, runid):
 
 
 _warning_re = re.compile('\w*warning', re.I)
-_error_re = re.compile(r'(?P<prefix>\s*)Traceback \(most recent call last\):' +
-                       r'(\n(?P=prefix)[ \t]+[^\n]*)+\n(?P=prefix)(?P<error>[\w\.]+)')
 
 
 def get_warnings(output):
@@ -379,7 +376,19 @@ def get_exceptions(output):
     ... ZeroDivisionError: integer division or modulo by zero''')
     ['ZeroDivisionError']
     """
-    return [x.group('error') for x in _error_re.finditer(output)]
+    errors = []
+    readtb = False
+    for line in output.split('\n'):
+        if 'Traceback (most recent call last):' in line:
+            readtb = True
+        else:
+            if readtb:
+                if line[:1] == ' ':
+                    pass
+                else:
+                    errors.append(line.split(':')[0])
+                    readtb = False
+    return errors
 
 
 def get_warning_stats(output):
@@ -421,7 +430,7 @@ def get_traceback_stats(output, test):
         traceback_count -= 1
     items = counter.items()
     items.sort(key=lambda (a, b): -b)
-    if traceback_count>0:
+    if traceback_count > 0:
         items.append(('other traceback', traceback_count))
     result = []
     for name, count in items:
@@ -433,7 +442,7 @@ def get_traceback_stats(output, test):
 
 
 def get_info(output, test):
-    output = output[:OUTPUT_LIMIT*2]
+    output = output[:OUTPUT_LIMIT]
     traceback_stats, ignored_list = get_traceback_stats(output, test)
     warning_stats = get_warning_stats(output)
     result = traceback_stats + warning_stats
@@ -494,7 +503,8 @@ def main():
     parser.add_option('-v', '--verbose', default=0, action='count')
     parser.add_option('-q', '--quiet', default=0, action='count')
     parser.add_option('--verbosity', default=0, type='int', help=optparse.SUPPRESS_HELP)
-    parser.add_option('--db')
+    parser.add_option('--db', default='testresults.sqlite3')
+    parser.add_option('--no-db', dest='db', action='store_false')
     parser.add_option('--runid')
     parser.add_option('--record', default=False, action='store_true')
     parser.add_option('--no-capture', dest='capture', default=True, action='store_false')
@@ -504,14 +514,13 @@ def main():
     options, args = parser.parse_args()
     options.verbosity += options.verbose - options.quiet
 
-    if not options.db and sqlite3:
-        if get_changeset().endswith('+'):
-            options.db = get_tempnam()
+    if options.db:
+        if sqlite3:
+            options.db = os.path.abspath(options.db)
+            print 'Using the database: %s' % options.db
         else:
-            options.db = 'testresults.sqlite3'
-        print 'Using the database: %s' % options.db
-    elif options.db and not sqlite3:
-        sys.exit('Cannot access the database %r: no sqlite3 module found.' % (options.db, ))
+            sys.stderr.write('Cannot access the database %r: no sqlite3 module found.\n' % (options.db, ))
+            options.db = False
 
     if options.db:
         db = sqlite3.connect(options.db)

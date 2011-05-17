@@ -13,6 +13,18 @@ to :meth:`Queue.get` retrieves the item.
 Another interesting difference is that :meth:`Queue.qsize`, :meth:`Queue.empty`, and
 :meth:`Queue.full` *can* be used as indicators of whether the subsequent :meth:`Queue.get`
 or :meth:`Queue.put` will not block.
+
+Additionally, queues in this module implement iterator protocol. Iterating over queue
+means repeatedly calling :meth:`get <Queue.get>` until :meth:`get <Queue.get>` returns ``StopIteration``.
+
+    >>> queue = gevent.queue.Queue()
+    >>> queue.put(1)
+    >>> queue.put(2)
+    >>> queue.put(StopIteration)
+    >>> for item in queue:
+    ...    print item
+    1
+    2
 """
 
 import sys
@@ -126,7 +138,7 @@ class Queue(object):
             try:
                 if self.getters:
                     self._schedule_unlock()
-                result = waiter.wait()
+                result = waiter.get()
                 assert result is waiter, "Invalid switch into Queue.put: %r" % (result, )
                 if waiter.item is not _NONE:
                     self._put(item)
@@ -175,7 +187,7 @@ class Queue(object):
                 self.getters.add(waiter)
                 if self.putters:
                     self._schedule_unlock()
-                return waiter.wait()
+                return waiter.get()
             finally:
                 self.getters.discard(waiter)
                 timeout.cancel()
@@ -208,7 +220,7 @@ class Queue(object):
                         getter = self.getters.pop()
                         if getter:
                             item = putter.item
-                            putter.item = _NONE # this makes greenlet calling put() not to call _put() again
+                            putter.item = _NONE  # this makes greenlet calling put() not to call _put() again
                             self._put(item)
                             item = self._get()
                             getter.switch(item)
@@ -221,7 +233,7 @@ class Queue(object):
                 else:
                     break
         finally:
-            self._event_unlock = None # QQQ maybe it's possible to obtain this info from libevent?
+            self._event_unlock = None  # QQQ maybe it's possible to obtain this info from libevent?
             # i.e. whether this event is pending _OR_ currently executing
         # testcase: 2 greenlets: while True: q.put(q.get()) - nothing else has a change to execute
         # to avoid this, schedule unlock with timer(0, ...) once in a while
@@ -230,6 +242,15 @@ class Queue(object):
         if self._event_unlock is None:
             self._event_unlock = core.active_event(self._unlock)
             # QQQ re-activate event (with event_active libevent call) instead of creating a new one each time
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        result = self.get()
+        if result is StopIteration:
+            raise result
+        return result
 
 
 class ItemWaiter(Waiter):
@@ -277,6 +298,7 @@ class JoinableQueue(Queue):
         Queue.__init__(self, maxsize)
         self.unfinished_tasks = 0
         self._cond = Event()
+        self._cond.set()
 
     def _format(self):
         result = Queue._format(self)
@@ -315,4 +337,3 @@ class JoinableQueue(Queue):
         unfinished tasks drops to zero, :meth:`join` unblocks.
         '''
         self._cond.wait()
-

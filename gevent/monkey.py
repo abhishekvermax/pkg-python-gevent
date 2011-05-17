@@ -56,9 +56,13 @@ Monkey patches:
   - thread-local storage becomes greenlet-local storage
 """
 
-import sys
-
-noisy = True
+__all__ = ['patch_all',
+           'patch_socket',
+           'patch_ssl',
+           'patch_os',
+           'patch_time',
+           'patch_select',
+           'patch_thread']
 
 
 def patch_os():
@@ -96,10 +100,12 @@ def patch_thread(threading=True, _threading_local=True):
         from gevent.local import local
         thread._local = local
         if threading:
-            if noisy and 'threading' in sys.modules:
-                sys.stderr.write("gevent.monkey's warning: 'threading' is already imported\n\n")
             threading = __import__('threading')
             threading.local = local
+            threading._start_new_thread = green_thread.start_new_thread
+            threading._allocate_lock = green_thread.allocate_lock
+            threading.Lock = green_thread.allocate_lock
+            threading._get_ident = green_thread.get_ident
         if _threading_local:
             _threading_local = __import__('_threading_local')
             _threading_local.local = local
@@ -107,13 +113,14 @@ def patch_thread(threading=True, _threading_local=True):
 
 def patch_socket(dns=True, aggressive=True):
     """Replace the standard socket object with gevent's cooperative sockets.
-    
+
     If *dns* is true, also patch dns functions in :mod:`socket`.
     """
     from gevent import socket
     _socket = __import__('socket')
     _socket.socket = socket.socket
     _socket.SocketType = socket.SocketType
+    _socket.create_connection = socket.create_connection
     if hasattr(socket, 'socketpair'):
         _socket.socketpair = socket.socketpair
     if hasattr(socket, 'fromfd'):
@@ -170,7 +177,14 @@ def patch_select(aggressive=False):
         _select.__dict__.pop('kevent', None)
 
 
-def patch_all(socket=True, dns=True, time=True, select=True, thread=True, os=True, ssl=True, aggressive=True):
+def patch_httplib():
+    httplib = __import__('httplib')
+    from gevent.httplib import HTTPConnection, HTTPSConnection
+    httplib.HTTPConnection = HTTPConnection
+    httplib.HTTPSConnection = HTTPSConnection
+
+
+def patch_all(socket=True, dns=True, time=True, select=True, thread=True, os=True, ssl=True, httplib=False, aggressive=True):
     """Do all of the default monkey patching (calls every other function in this module."""
     # order is important
     if os:
@@ -185,10 +199,13 @@ def patch_all(socket=True, dns=True, time=True, select=True, thread=True, os=Tru
         patch_select(aggressive=aggressive)
     if ssl:
         patch_ssl()
+    if httplib:
+        patch_httplib()
 
 
 if __name__ == '__main__':
-    modules = [x.replace('patch_', '') for x in globals().keys() if x.startswith('patch_') and x!='patch_all']
+    import sys
+    modules = [x.replace('patch_', '') for x in globals().keys() if x.startswith('patch_') and x != 'patch_all']
     script_help = """gevent.monkey - monkey patch the standard modules to use gevent.
 
 USAGE: python -m gevent.monkey [MONKEY OPTIONS] script [SCRIPT OPTIONS]
@@ -215,7 +232,8 @@ MONKEY OPTIONS: --verbose %s""" % ', '.join('--[no-]%s' % m for m in modules)
         del argv[0]
         # TODO: break on --
     if verbose:
-        import pprint, os
+        import pprint
+        import os
         print 'gevent.monkey.patch_all(%s)' % ', '.join('%s=%s' % item for item in args.items())
         print 'sys.version=%s' % (sys.version.strip().replace('\n', ' '), )
         print 'sys.path=%s' % pprint.pformat(sys.path)
@@ -229,4 +247,3 @@ MONKEY OPTIONS: --verbose %s""" % ', '.join('--[no-]%s' % m for m in modules)
         execfile(sys.argv[0])
     else:
         print script_help
-

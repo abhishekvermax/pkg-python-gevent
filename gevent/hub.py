@@ -100,15 +100,17 @@ def _wrap_signal_handler(handler, args, kwargs):
     except:
         core.active_event(MAIN.throw, *sys.exc_info())
 
+
 def signal(signalnum, handler, *args, **kwargs):
-    return core.signal(signalnum, lambda : spawn_raw(_wrap_signal_handler, handler, args, kwargs))
+    return core.signal(signalnum, lambda: spawn_raw(_wrap_signal_handler, handler, args, kwargs))
 
 
 if _original_fork is not None:
 
     def fork():
         result = _original_fork()
-        core.reinit()
+        if not result:
+            core.reinit()
         return result
 
 
@@ -150,18 +152,18 @@ class Hub(greenlet):
     def switch(self):
         cur = getcurrent()
         assert cur is not self, 'Cannot switch to MAINLOOP from MAINLOOP'
-        exc_info = sys.exc_info()
+        exc_type, exc_value = sys.exc_info()[:2]
         try:
-            sys.exc_clear()
             switch_out = getattr(cur, 'switch_out', None)
             if switch_out is not None:
                 try:
                     switch_out()
                 except:
                     traceback.print_exc()
+            sys.exc_clear()
             return greenlet.switch(self)
         finally:
-            core.set_exc_info(*exc_info)
+            core.set_exc_info(exc_type, exc_value)
 
     def run(self):
         global _threadlocal
@@ -169,7 +171,7 @@ class Hub(greenlet):
         try:
             self.keyboard_interrupt_signal = signal(2, core.active_event, MAIN.throw, KeyboardInterrupt)
         except IOError:
-            pass # no signal() on windows
+            pass  # no signal() on Windows
         try:
             loop_count = 0
             while True:
@@ -204,7 +206,7 @@ class Hub(greenlet):
         try:
             self.switch()
         except DispatchExit, ex:
-            if ex.code == 1: # no more events registered?
+            if ex.code == 1:  # no more events registered?
                 return
             raise
 
@@ -320,7 +322,13 @@ class Waiter(object):
             finally:
                 self.greenlet = None
 
-    wait = get # XXX backward compatibility; will be removed in the next release
+    wait = get  # XXX backward compatibility; will be removed in the next release
+
+    def __call__(self, source):
+        if source.exception is None:
+            self.switch(source.value)
+        else:
+            self.throw(source.exception)
 
     # can also have a debugging version, that wraps the value in a tuple (self, value) in switch()
     # and unwraps it in wait() thus checking that switch() was indeed called
@@ -329,8 +337,8 @@ class Waiter(object):
 class _NONE(object):
     "A special thingy you must never pass to any of gevent API"
     __slots__ = []
+
     def __repr__(self):
         return '<_NONE>'
 
 _NONE = _NONE()
-
