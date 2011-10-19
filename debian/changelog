@@ -1,6 +1,7 @@
 python-gevent (0.13.6-2) unstable; urgency=low
 
   * Added dependency on libjs-underscore. Thanks to Nick Barkas for patch.
+  * Fixed debug package. Thanks to Nick Barkas for patch.
 
  -- Örjan Persson <orange@fobie.net>  Wed, 19 Oct 2011 20:00:59 +0200
 
