@@ -21,7 +21,7 @@ Description: gevent is a coroutine-based Python networking library - debugging s
 Package: python-gevent-doc
 Section: doc
 Architecture: all
-Depends: ${shlibs:Depends}, ${misc:Depends}, libjs-jquery
+Depends: ${shlibs:Depends}, ${misc:Depends}, libjs-jquery, libjs-underscore
 Priority: optional
 Description: gevent is a coroutine-based Python networking library - documentation
  gevent uses greenlet to provide a high-level synchronous API on top of
