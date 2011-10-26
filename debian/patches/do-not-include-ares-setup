@@ -1,0 +1,18 @@
+Description: Missing ifdef in dnshelper.c. This file should only be included
+if we have the c-ares source.
+
+Author: Örjan Persson <orange@fobie.net>
+Last-Update: 2011-10-26
+Index: python-gevent/gevent/dnshelper.c
+===================================================================
+--- python-gevent.orig/gevent/dnshelper.c	2011-10-26 22:27:44.579596923 +0200
++++ python-gevent/gevent/dnshelper.c	2011-10-26 22:28:06.519705718 +0200
+@@ -1,6 +1,8 @@
+ /* Copyright (c) 2011 Denis Bilenko. See LICENSE for details. */
+ #include "Python.h"
++#ifdef CARES_EMBED
+ #include "ares_setup.h"
++#endif
+ 
+ #ifdef HAVE_NETDB_H
+ #include <netdb.h>
