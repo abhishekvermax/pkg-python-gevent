@@ -1,5 +1,6 @@
 import greentest
 import gevent
+import sys
 from gevent.event import Event, AsyncResult
 
 DELAY = 0.01
@@ -33,7 +34,8 @@ class TestAsyncResult(greentest.TestCase):
             try:
                 result = e.get()
                 log.append(('received', result))
-            except Exception, ex:
+            except Exception:
+                ex = sys.exc_info()[1]
                 log.append(('catched', ex))
         gevent.spawn(waiter)
         obj = Exception()
@@ -59,7 +61,8 @@ class TestAsyncResult(greentest.TestCase):
             g.kill()
 
 
-class TestAsync_ResultAsLinkTarget(greentest.TestCase):
+class TestAsyncResultAsLinkTarget(greentest.TestCase):
+    error_fatal = False
 
     def test_set(self):
         g = gevent.spawn(lambda: 1)
@@ -73,7 +76,7 @@ class TestAsync_ResultAsLinkTarget(greentest.TestCase):
 
     def test_set_exception(self):
         def func():
-            raise greentest.ExpectedException('TestAsync_ResultAsLinkTarget.test_set_exception')
+            raise greentest.ExpectedException('TestAsyncResultAsLinkTarget.test_set_exception')
         g = gevent.spawn(func)
         s1, s2, s3 = AsyncResult(), AsyncResult(), AsyncResult()
         g.link(s1)

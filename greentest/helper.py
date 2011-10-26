@@ -11,7 +11,10 @@ missing_modules = {
     'test_httpservers': ['2.4', '2.5'],
     'test_ftplib': ['2.4', '2.5'],
     'test_wsgiref': ['2.4'],
-    'test_socket_ssl': ['2.6', '2.7']}
+    'test_socket_ssl': ['2.6', '2.7', '3.1', '3.2'],
+    'test_patched_urllib2_localnet.py': ['3.1', '3.2'],
+    'test_ssl': ['2.5'],
+}
 
 
 class ContainsAll(object):
@@ -19,14 +22,14 @@ class ContainsAll(object):
         return True
 
 
-def patch_all(**kwargs):
-    timeout = kwargs.pop('timeout', None)
-    kwargs.setdefault('aggressive', True)
+def patch_all(timeout=None):
     from gevent import monkey
-    monkey.patch_all(**kwargs)
+    monkey.patch_all(aggressive=True)
     import unittest
     import greentest
-    unittest.TestCase = greentest.TestCase0
+    unittest.TestCase = greentest.TestCase
+    unittest.TestCase.check_totalrefcount = False
+    unittest.TestCase.error_fatal = False
     if timeout is not None:
         unittest.TestCase.__timeout__ = timeout
 
@@ -40,15 +43,17 @@ def imp_find_dotted_module(name):
     return result
 
 
-def prepare_stdlib_test(filename, **kwargs):
-    kwargs.setdefault('timeout', 20)
-    patch_all(**kwargs)
+def prepare_stdlib_test(filename):
+    patch_all(timeout=20)
     import test
     try:
         from test import test_support
     except ImportError:
-        sys.stderr.write('test.__file__ = %s\n' % test.__file__)
-        raise
+        try:
+            from test import support as test_support
+        except ImportError:
+            sys.stderr.write('test.__file__ = %s\n' % test.__file__)
+            raise
     test_support.use_resources = ContainsAll()
 
     name = os.path.splitext(os.path.basename(filename))[0].replace('_patched', '')
@@ -64,8 +69,8 @@ def prepare_stdlib_test(filename, **kwargs):
         raise
 
     module_source = _f.read()
-    from patched_tests_setup import disable_tests_in_the_source
-    module_source = disable_tests_in_the_source(module_source, name)
+    from patched_tests_setup import disable_tests_in_source
+    module_source = disable_tests_in_source(module_source, name)
     module_code = compile(module_source, _filename, 'exec')
 
     print >> sys.stderr, 'Testing %s with monkey patching' % _filename

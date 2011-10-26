@@ -1,20 +1,16 @@
 Introduction
 ============
 
-gevent is a Python networking library that uses greenlet_ to provide a synchronous API on top of libevent_ event loop.
+gevent is a coroutine-based Python networking library.
 
 Features include:
 
-* Fast event loop based on libevent (epoll on Linux, kqueue on FreeBSD).
+* Fast event loop based on libev (epoll on Linux, kqueue on FreeBSD).
 * Lightweight execution units based on greenlet.
 * API that re-uses concepts from the Python standard library (e.g. :class:`Event`, :class:`Queue`).
 * Cooperative :mod:`socket` and :mod:`ssl` modules.
 * Ability to use standard library and 3rd party modules written for standard blocking sockets (:mod:`gevent.monkey`).
-* DNS queries performed through libevent-dns.
-* Fast WSGI server based on libevent-http.
-
-.. _greenlet: http://codespeak.net/py/0.9.2/greenlet.html
-.. _libevent: http://monkey.org/~provos/libevent/
+* DNS queries performed through c-ares.
 
 
 Installation
@@ -119,9 +115,8 @@ Lightweight pseudothreads
 
 The greenlets are spawned by creating a :class:`Greenlet` instance and calling its :meth:`start <Greenlet.start>`
 method. (The :func:`spawn` function is a shortcut that does exactly that). The :meth:`start <Greenlet.start>`
-method schedules an :class:`event <gevent.core.active_event>` that will switch to the greenlet created, as soon
-as the current greenlet gives up control. If there is more than one active event, they will be executed
-one by one, in an undefined order.
+method schedules a switch to the greenlet that will happen as soon as the current greenlet gives up control.
+If there is more than one active event, they will be executed one by one, in an undefined order.
 
 If there was an error during execution it won't escape greenlet's boundaries. An unhandled error results
 in a stacktrace being printed complemented by failed function signature and arguments:

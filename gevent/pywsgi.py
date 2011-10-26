@@ -1,5 +1,5 @@
 # Copyright (c) 2005-2009, eventlet contributors
-# Copyright (c) 2009-2010, gevent contributors
+# Copyright (c) 2009-2011, gevent contributors
 
 import errno
 import sys
@@ -12,6 +12,7 @@ from urllib import unquote
 from gevent import socket
 import gevent
 from gevent.server import StreamServer
+from gevent import server
 from gevent.hub import GreenletExit
 
 
@@ -238,7 +239,7 @@ class WSGIHandler(object):
             except KeyError:
                 pass
 
-        content_length = self.headers.get("Content-Length")
+        content_length = self.headers.get("content-length")
         if content_length is not None:
             content_length = int(content_length)
             if content_length < 0:
@@ -300,11 +301,10 @@ class WSGIHandler(object):
         try:
             if not self.read_request(raw_requestline):
                 return ('400', _BAD_REQUEST_RESPONSE)
-        except ValueError, ex:
-            self.log_error('Invalid request: %s', str(ex) or ex.__class__.__name__)
-            return ('400', _BAD_REQUEST_RESPONSE)
-        except Exception, ex:
-            traceback.print_exc()
+        except Exception:
+            ex = sys.exc_info()[1]
+            if not isinstance(ex, ValueError):
+                traceback.print_exc()
             self.log_error('Invalid request: %s', str(ex) or ex.__class__.__name__)
             return ('400', _BAD_REQUEST_RESPONSE)
 
@@ -312,10 +312,12 @@ class WSGIHandler(object):
         self.application = self.server.application
         try:
             self.handle_one_response()
-        except socket.error, ex:
+        except socket.error:
+            ex = sys.exc_info()[1]
             # Broken pipe, connection reset by peer
-            if ex[0] in (errno.EPIPE, errno.ECONNRESET):
+            if ex.args[0] in (errno.EPIPE, errno.ECONNRESET):
                 sys.exc_clear()
+                return
             else:
                 raise
 
@@ -327,40 +329,40 @@ class WSGIHandler(object):
 
         return True  # read more requests
 
+    def finalize_headers(self):
+        response_headers_list = [x[0] for x in self.response_headers]
+        if 'Date' not in response_headers_list:
+            self.response_headers.append(('Date', format_date_time(time.time())))
+
+        if self.request_version == 'HTTP/1.0' and 'Connection' not in response_headers_list:
+            self.response_headers.append(('Connection', 'close'))
+            self.close_connection = True
+        elif ('Connection', 'close') in self.response_headers:
+            self.close_connection = True
+
+        if self.code not in [204, 304]:
+            # the reply will include message-body; make sure we have either Content-Length or chunked
+            if 'Content-Length' not in response_headers_list:
+                if hasattr(self.result, '__len__'):
+                    self.response_headers.append(('Content-Length', str(sum(len(chunk) for chunk in self.result))))
+                else:
+                    if self.request_version != 'HTTP/1.0':
+                        self.response_use_chunked = True
+                        self.response_headers.append(('Transfer-Encoding', 'chunked'))
+
     def write(self, data):
         towrite = []
         if not self.status:
             raise AssertionError("The application did not call start_response()")
         if not self.headers_sent:
-            if 'Date' not in self.response_headers_list:
-                self.response_headers.append(('Date', format_date_time(time.time())))
-                self.response_headers_list.append('Date')
-
-            if self.request_version == 'HTTP/1.0' and 'Connection' not in self.response_headers_list:
-                self.response_headers.append(('Connection', 'close'))
-                self.response_headers_list.append('Connection')
-                self.close_connection = True
-            elif ('Connection', 'close') in self.response_headers:
-                self.close_connection = True
-
-            if self.code not in [204, 304]:
-                # the reply will include message-body; make sure we have either Content-Length or chunked
-                if 'Content-Length' not in self.response_headers_list:
-                    if hasattr(self.result, '__len__'):
-                        self.response_headers.append(('Content-Length', str(sum(len(chunk) for chunk in self.result))))
-                        self.response_headers_list.append('Content-Length')
-                    else:
-                        if self.request_version != 'HTTP/1.0':
-                            self.response_use_chunked = True
-                            self.response_headers.append(('Transfer-Encoding', 'chunked'))
-                            self.response_headers_list.append('Transfer-Encoding')
+            self.headers_sent = True
+            self.finalize_headers()
 
             towrite.append('%s %s\r\n' % (self.request_version, self.status))
             for header in self.response_headers:
                 towrite.append('%s: %s\r\n' % header)
 
             towrite.append('\r\n')
-            self.headers_sent = True
 
         if data:
             if self.response_use_chunked:
@@ -370,7 +372,13 @@ class WSGIHandler(object):
                 towrite.append(data)
 
         msg = ''.join(towrite)
-        self.socket.sendall(msg)
+        try:
+            self.socket.sendall(msg)
+        except socket.error, ex:
+            self.status = 'socket error: %s' % ex
+            if self.code > 0:
+                self.code = -self.code
+            raise
         self.response_length += len(msg)
 
     def start_response(self, status, headers, exc_info=None):
@@ -385,7 +393,6 @@ class WSGIHandler(object):
         self.code = int(status.split(' ', 1)[0])
         self.status = status
         self.response_headers = [('-'.join([x.capitalize() for x in key.split('-')]), value) for key, value in headers]
-        self.response_headers_list = [x[0] for x in self.response_headers]
         return self.write
 
     def log_request(self):
@@ -436,29 +443,26 @@ class WSGIHandler(object):
         try:
             try:
                 self.run_application()
-            except GreenletExit:
-                raise
-            except Exception:
-                traceback.print_exc()
-                sys.exc_clear()
-                try:
-                    args = (getattr(self, 'server', ''),
-                            getattr(self, 'requestline', ''),
-                            getattr(self, 'client_address', ''),
-                            getattr(self, 'application', ''))
-                    msg = '%s: Failed to handle request:\n  request = %s from %s\n  application = %s\n\n' % args
-                    sys.stderr.write(msg)
-                except Exception:
-                    sys.exc_clear()
-                if not self.response_length:
-                    self.start_response(_INTERNAL_ERROR_STATUS, _INTERNAL_ERROR_HEADERS)
-                    self.write(_INTERNAL_ERROR_BODY)
+            finally:
+                close = getattr(self.result, 'close', None)
+                if close is not None:
+                    close()
+                self.wsgi_input._discard()
+        except:
+            self.handle_error(*sys.exc_info())
         finally:
-            if hasattr(self.result, 'close'):
-                self.result.close()
-            self.wsgi_input._discard()
             self.time_finish = time.time()
             self.log_request()
+
+    def handle_error(self, type, value, tb):
+        if not issubclass(type, GreenletExit):
+            self.server.loop.handle_error(self.environ, type, value, tb)
+        del tb
+        if self.response_length:
+            self.close_connection = True
+        else:
+            self.start_response(_INTERNAL_ERROR_STATUS, _INTERNAL_ERROR_HEADERS)
+            self.write(_INTERNAL_ERROR_BODY)
 
     def get_environ(self):
         env = self.server.get_environ()
@@ -530,6 +534,7 @@ class WSGIServer(StreamServer):
         else:
             self.log = log
         self.set_environ(environ)
+        self.set_max_accept()
 
     def set_environ(self, environ=None):
         if environ is not None:
@@ -544,6 +549,13 @@ class WSGIServer(StreamServer):
             self.environ.update(environ_update)
         if self.environ.get('wsgi.errors') is None:
             self.environ['wsgi.errors'] = sys.stderr
+
+    def set_max_accept(self):
+        if self.max_accept is None:
+            if self.environ.get('wsgi.multiprocess'):
+                self.max_accept = 1
+            else:
+                self.max_accept = server.DEFAULT_MAX_ACCEPT
 
     def get_environ(self):
         return self.environ.copy()

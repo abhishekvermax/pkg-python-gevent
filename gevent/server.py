@@ -1,15 +1,17 @@
-# Copyright (c) 2009-2010 Denis Bilenko. See LICENSE for details.
+# Copyright (c) 2009-2011 Denis Bilenko. See LICENSE for details.
 """TCP/SSL server"""
 import sys
 import errno
-import traceback
 from gevent import socket
-from gevent import core
 from gevent.baseserver import BaseServer
+from gevent.hub import get_hub
 from gevent.socket import EWOULDBLOCK
 
 
 __all__ = ['StreamServer']
+
+
+DEFAULT_MAX_ACCEPT = 100
 
 
 class StreamServer(BaseServer):
@@ -38,7 +40,10 @@ class StreamServer(BaseServer):
     # Sets the maximum number of consecutive accepts that a process may perform on
     # a single wake up. High values give higher priority to high connection rates,
     # while lower values give higher priority to already established connections.
-    max_accept = 100
+    # Default is 100. Note, that in case of multiple working processes on the same
+    # listening value, it should be set to a lower value. (pywsgi.WSGIServer sets it
+    # to 1 when environ["wsgi.multiprocess"] is true)
+    max_accept = None
 
     # the number of seconds to sleep in case there was an error in accept() call
     # for consecutive errors the delay will double until it reaches max_delay
@@ -49,12 +54,7 @@ class StreamServer(BaseServer):
     def __init__(self, listener, handle=None, backlog=None, spawn='default', **ssl_args):
         if ssl_args:
             ssl_args.setdefault('server_side', True)
-            try:
-                from gevent.ssl import wrap_socket
-            except ImportError:
-                wrap_socket = _import_sslold_wrap_socket()
-                if wrap_socket is None:
-                    raise
+            from gevent.ssl import wrap_socket
             self.wrap_socket = wrap_socket
             self.ssl_args = ssl_args
             self.ssl_enabled = True
@@ -64,6 +64,7 @@ class StreamServer(BaseServer):
         self.delay = self.min_delay
         self._accept_event = None
         self._start_accepting_timer = None
+        self.loop = get_hub().loop
 
     def set_listener(self, listener, backlog=None):
         BaseServer.set_listener(self, listener, backlog=backlog)
@@ -77,14 +78,16 @@ class StreamServer(BaseServer):
         if self.pool is not None:
             self.pool._semaphore.rawlink(self._start_accepting_if_started)
 
-    def kill(self):
+    def close(self):
         try:
-            BaseServer.kill(self)
+            BaseServer.close(self)
         finally:
             self.__dict__.pop('_handle', None)
             pool = getattr(self, 'pool', None)
             if pool is not None:
                 pool._semaphore.unlink(self._start_accepting_if_started)
+
+    kill = close  # this is deprecated
 
     def pre_start(self):
         BaseServer.pre_start(self)
@@ -96,7 +99,10 @@ class StreamServer(BaseServer):
 
     def start_accepting(self):
         if self._accept_event is None:
-            self._accept_event = core.read_event(self.socket.fileno(), self._do_accept, persist=True)
+            if self.max_accept is None:
+                self.max_accept = DEFAULT_MAX_ACCEPT
+            self._accept_event = self.loop.io(self.socket.fileno(), 1)
+            self._accept_event.start(self._do_accept)
 
     def _start_accepting_if_started(self, _event=None):
         if self.started:
@@ -104,14 +110,13 @@ class StreamServer(BaseServer):
 
     def stop_accepting(self):
         if self._accept_event is not None:
-            self._accept_event.cancel()
+            self._accept_event.stop()
             self._accept_event = None
         if self._start_accepting_timer is not None:
-            self._start_accepting_timer.cancel()
+            self._start_accepting_timer.stop()
             self._start_accepting_timer = None
 
-    def _do_accept(self, event, _evtype):
-        assert event is self._accept_event
+    def _do_accept(self):
         for _ in xrange(self.max_accept):
             address = None
             try:
@@ -132,24 +137,18 @@ class StreamServer(BaseServer):
                 else:
                     spawn(self._handle, client_socket, address)
             except:
-                traceback.print_exc()
+                self.loop.handle_error((address, self), *sys.exc_info())
                 ex = sys.exc_info()[1]
                 if self.is_fatal_error(ex):
-                    self.kill()
+                    self.close()
                     sys.stderr.write('ERROR: %s failed with %s\n' % (self, str(ex) or repr(ex)))
                     return
-                try:
-                    if address is None:
-                        sys.stderr.write('%s: Failed.\n' % (self, ))
-                    else:
-                        sys.stderr.write('%s: Failed to handle request from %s\n' % (self, address, ))
-                except Exception:
-                    traceback.print_exc()
                 if self.delay >= 0:
                     self.stop_accepting()
-                    self._start_accepting_timer = core.timer(self.delay, self.start_accepting)
+                    self._start_accepting_timer = self.loop.timer(self.delay)
+                    self._start_accepting_timer.start(self._start_accepting_if_started)
                     self.delay = min(self.max_delay, self.delay * 2)
-                return
+                break
 
     def is_fatal_error(self, ex):
         return isinstance(ex, socket.error) and ex[0] in (errno.EBADF, errno.EINVAL, errno.ENOTSOCK)
@@ -158,11 +157,3 @@ class StreamServer(BaseServer):
         # used in case of ssl sockets
         ssl_socket = self.wrap_socket(client_socket, **self.ssl_args)
         return self.handle(ssl_socket, address)
-
-
-def _import_sslold_wrap_socket():
-    try:
-        from gevent.sslold import wrap_socket
-        return wrap_socket
-    except ImportError:
-        pass

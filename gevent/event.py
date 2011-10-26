@@ -1,9 +1,7 @@
-# Copyright (c) 2009-2010 Denis Bilenko. See LICENSE for details.
+# Copyright (c) 2009-2011 Denis Bilenko. See LICENSE for details.
 """Basic synchronization primitives: Event and AsyncResult"""
 
 import sys
-import traceback
-from gevent import core
 from gevent.hub import get_hub, getcurrent, _NONE
 from gevent.timeout import Timeout
 
@@ -20,8 +18,11 @@ class Event(object):
     """
 
     def __init__(self):
-        self._links = []
+        self._links = set()
+        self._todo = set()
         self._flag = False
+        self.hub = get_hub()
+        self._notifier = self.hub.loop.callback()
 
     def __str__(self):
         return '<%s %s>' % (self.__class__.__name__, (self._flag and 'set') or 'clear')
@@ -38,9 +39,10 @@ class Event(object):
         Greenlets that call :meth:`wait` once the flag is true will not block at all.
         """
         self._flag = True
-        if self._links:
+        self._todo.update(self._links)
+        if self._todo and not self._notifier.active:
             # schedule a job to notify the links already set
-            core.active_event(self._notify_links, list(self._links))
+            self._notifier.start(self._notify_links)
 
     def clear(self):
         """Reset the internal flag to false.
@@ -61,7 +63,6 @@ class Event(object):
 
         Return the value of the internal flag (``True`` or ``False``).
         """
-
         if self._flag:
             return self._flag
         else:
@@ -71,9 +72,10 @@ class Event(object):
                 timer = Timeout.start_new(timeout)
                 try:
                     try:
-                        result = get_hub().switch()
+                        result = self.hub.switch()
                         assert result is self, 'Invalid switch into Event.wait(): %r' % (result, )
-                    except Timeout, ex:
+                    except Timeout:
+                        ex = sys.exc_info()[1]
                         if ex is not timer:
                             raise
                 finally:
@@ -90,9 +92,10 @@ class Event(object):
         """
         if not callable(callback):
             raise TypeError('Expected callable: %r' % (callback, ))
-        self._links.append(callback)
-        if self._flag:
-            core.active_event(self._notify_links, list(self._links))  # XXX just pass [callback]
+        self._links.add(callback)
+        if self._flag and not self._notifier.active:
+            self._todo.add(callback)
+            self._notifier.start(self._notify_links)
 
     def unlink(self, callback):
         """Remove the callback set by :meth:`rawlink`"""
@@ -101,18 +104,14 @@ class Event(object):
         except ValueError:
             pass
 
-    def _notify_links(self, links):
-        assert getcurrent() is get_hub()
-        for link in links:
+    def _notify_links(self):
+        while self._todo:
+            link = self._todo.pop()
             if link in self._links:  # check that link was not notified yet and was not removed by the client
                 try:
                     link(self)
                 except:
-                    traceback.print_exc()
-                    try:
-                        sys.stderr.write('Failed to notify link %r of %r\n\n' % (link, self))
-                    except:
-                        traceback.print_exc()
+                    self.hub.handle_error((link, self), *sys.exc_info())
 
 
 class AsyncResult(object):
@@ -152,7 +151,8 @@ class AsyncResult(object):
         self._links = set()
         self.value = None
         self._exception = _NONE
-        self._notifier = None
+        self.hub = get_hub()
+        self._notifier = self.hub.loop.callback()
 
     def ready(self):
         """Return true if and only if it holds a value or an exception"""
@@ -177,8 +177,8 @@ class AsyncResult(object):
         """
         self.value = value
         self._exception = None
-        if self._links and self._notifier is None:
-            self._notifier = core.active_event(self._notify_links)
+        if self._links and not self._notifier.active:
+            self._notifier.start(self._notify_links)
 
     def set_exception(self, exception):
         """Store the exception. Wake up the waiters.
@@ -187,8 +187,8 @@ class AsyncResult(object):
         Sequential calls to :meth:`wait` and :meth:`get` will not block at all.
         """
         self._exception = exception
-        if self._links and self._notifier is None:
-            self._notifier = core.active_event(self._notify_links)
+        if self._links and not self._notifier.active:
+            self._notifier.start(self._notify_links)
 
     def get(self, block=True, timeout=None):
         """Return the stored value or raise the exception.
@@ -211,7 +211,7 @@ class AsyncResult(object):
             try:
                 timer = Timeout.start_new(timeout)
                 try:
-                    result = get_hub().switch()
+                    result = self.hub.switch()
                     assert result is self, 'Invalid switch into AsyncResult.get(): %r' % (result, )
                 finally:
                     timer.cancel()
@@ -252,11 +252,12 @@ class AsyncResult(object):
             try:
                 timer = Timeout.start_new(timeout)
                 try:
-                    result = get_hub().switch()
+                    result = self.hub.switch()
                     assert result is self, 'Invalid switch into AsyncResult.wait(): %r' % (result, )
                 finally:
                     timer.cancel()
-            except Timeout, exc:
+            except Timeout:
+                exc = sys.exc_info()[1]
                 self.unlink(switch)
                 if exc is not timer:
                     raise
@@ -268,20 +269,12 @@ class AsyncResult(object):
         return self.value
 
     def _notify_links(self):
-        try:
-            assert getcurrent() is get_hub()
-            while self._links:
-                link = self._links.pop()
-                try:
-                    link(self)
-                except:
-                    traceback.print_exc()
-                    try:
-                        sys.stderr.write('Failed to notify link %r of %r\n\n' % (link, self))
-                    except:
-                        traceback.print_exc()
-        finally:
-            self._notifier = None
+        while self._links:
+            link = self._links.pop()
+            try:
+                link(self)
+            except:
+                self.hub.handle_error((link, self), *sys.exc_info())
 
     def rawlink(self, callback):
         """Register a callback to call when a value or an exception is set.
@@ -292,8 +285,8 @@ class AsyncResult(object):
         if not callable(callback):
             raise TypeError('Expected callable: %r' % (callback, ))
         self._links.add(callback)
-        if self.ready() and self._notifier is None:
-            self._notifier = core.active_event(self._notify_links)
+        if self.ready() and not self._notifier.active:
+            self._notifier.start(self._notify_links)
 
     def unlink(self, callback):
         """Remove the callback set by :meth:`rawlink`"""

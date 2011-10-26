@@ -1,4 +1,4 @@
-# Copyright (c) 2009-2010 Denis Bilenko. See LICENSE for details.
+# Copyright (c) 2009-2011 Denis Bilenko. See LICENSE for details.
 
 import sys
 import os
@@ -13,7 +13,6 @@ __all__ = ['getcurrent',
            'kill',
            'signal',
            'fork',
-           'shutdown',
            'get_hub',
            'Hub',
            'Waiter']
@@ -35,9 +34,11 @@ except ImportError:
 
 getcurrent = greenlet.getcurrent
 GreenletExit = greenlet.GreenletExit
-MAIN = greenlet.getcurrent()
 
-thread = __import__('thread')
+if sys.version_info[0] <= 2:
+    thread = __import__('thread')
+else:
+    thread = __import__('_thread')
 threadlocal = thread._local
 _threadlocal = threadlocal()
 _threadlocal.Hub = None
@@ -46,6 +47,8 @@ try:
 except AttributeError:
     _original_fork = None
     __all__.remove('fork')
+get_ident = thread.get_ident
+MAIN_THREAD = get_ident()
 
 
 def _switch_helper(function, args, kwargs):
@@ -54,33 +57,42 @@ def _switch_helper(function, args, kwargs):
 
 
 def spawn_raw(function, *args, **kwargs):
+    hub = get_hub()
     if kwargs:
-        g = greenlet(_switch_helper, get_hub())
-        core.active_event(g.switch, function, args, kwargs)
-        return g
+        g = greenlet(_switch_helper, hub)
+        hub.loop.run_callback(g.switch, function, args, kwargs)
     else:
-        g = greenlet(function, get_hub())
-        core.active_event(g.switch, *args)
-        return g
+        g = greenlet(function, hub)
+        hub.loop.run_callback(g.switch, *args)
+    return g
 
 
 def sleep(seconds=0):
     """Put the current greenlet to sleep for at least *seconds*.
 
     *seconds* may be specified as an integer, or a float if fractional seconds
-    are desired. Calling sleep with *seconds* of 0 is the canonical way of
-    expressing a cooperative yield.
+    are desired.
+
+    If *seconds* is equal to or less than zero, yield control the other coroutines
+    without actually putting the process to sleep. The :class:`core.idle` watcher
+    with the highest priority is used to achieve that.
     """
-    unique_mark = object()
-    if not seconds >= 0:
-        raise IOError(22, 'Invalid argument')
-    timer = core.timer(seconds, getcurrent().switch, unique_mark)
-    try:
-        switch_result = get_hub().switch()
-        assert switch_result is unique_mark, 'Invalid switch into sleep(): %r' % (switch_result, )
-    except:
-        timer.cancel()
-        raise
+    hub = get_hub()
+    loop = hub.loop
+    if seconds <= 0:
+        watcher = loop.idle()
+        watcher.priority = loop.MAXPRI
+    else:
+        watcher = loop.timer(seconds)
+    hub.wait(watcher)
+
+
+def idle(priority=0):
+    hub = get_hub()
+    watcher = hub.loop.idle()
+    if priority:
+        watcher.priority = priority
+    hub.wait(watcher)
 
 
 def kill(greenlet, exception=GreenletExit):
@@ -91,52 +103,131 @@ def kill(greenlet, exception=GreenletExit):
     so you have to use this function.
     """
     if not greenlet.dead:
-        core.active_event(greenlet.throw, exception)
+        get_hub().loop.run_callback(greenlet.throw, exception)
 
 
-def _wrap_signal_handler(handler, args, kwargs):
-    try:
-        handler(*args, **kwargs)
-    except:
-        core.active_event(MAIN.throw, *sys.exc_info())
+class signal(object):
 
+    greenlet_class = None
 
-def signal(signalnum, handler, *args, **kwargs):
-    return core.signal(signalnum, lambda: spawn_raw(_wrap_signal_handler, handler, args, kwargs))
+    def __init__(self, signalnum, handler, *args, **kwargs):
+        self.hub = get_hub()
+        self.watcher = self.hub.loop.signal(signalnum, ref=False)
+        self.watcher.start(self._start)
+        self.handler = handler
+        self.args = args
+        self.kwargs = kwargs
+        if self.greenlet_class is None:
+            from gevent import Greenlet
+            self.greenlet_class = Greenlet
+
+    def _get_ref(self):
+        return self.watcher.ref
+
+    def _set_ref(self, value):
+        self.watcher.ref = value
+
+    ref = property(_get_ref, _set_ref)
+    del _get_ref, _set_ref
+
+    def cancel(self):
+        self.watcher.stop()
+
+    def _start(self):
+        try:
+            greenlet = self.greenlet_class(self.handle)
+            greenlet.switch()
+        except:
+            self.hub.handle_error(None, *sys._exc_info())
+
+    def handle(self):
+        try:
+            self.handler(*self.args, **self.kwargs)
+        except:
+            self.hub.handle_error(None, *sys.exc_info())
 
 
 if _original_fork is not None:
 
     def fork():
         result = _original_fork()
-        if not result:
-            core.reinit()
+        get_hub().loop.reinit()
         return result
 
 
-def shutdown():
-    """Cancel our CTRL-C handler and wait for core.dispatch() to return."""
+def get_hub_class():
+    """Return the type of hub to use for the current thread.
+
+    If there's no type of hub for the current thread yet, 'gevent.hub.Hub' is used.
+    """
     global _threadlocal
-    hub = _threadlocal.__dict__.get('hub')
-    if hub is not None:
-        hub.shutdown()
+    try:
+        hubtype = _threadlocal.Hub
+    except AttributeError:
+        hubtype = None
+    if hubtype is None:
+        hubtype = _threadlocal.Hub = Hub
+    return hubtype
 
 
-def get_hub():
+def get_hub(*args, **kwargs):
+    """Return the hub for the current thread.
+
+    If hub does not exists in the current thread, the new one is created with call to :meth:`get_hub_class`.
+    """
     global _threadlocal
     try:
         return _threadlocal.hub
     except AttributeError:
-        try:
-            hubtype = _threadlocal.Hub
-        except AttributeError:
-            # do not pretend to support multiple threads because it's not implemented properly by core.pyx
-            # this may change in the future, although currently I don't have a strong need for this
-            raise NotImplementedError('gevent is only usable from a single thread')
-        if hubtype is None:
-            hubtype = Hub
-        hub = _threadlocal.hub = hubtype()
+        hubtype = get_hub_class()
+        hub = _threadlocal.hub = hubtype(*args, **kwargs)
         return hub
+
+
+def _get_hub():
+    """Return the hub for the current thread.
+
+    Return ``None`` if no hub has been created yet.
+    """
+    global _threadlocal
+    try:
+        return _threadlocal.hub
+    except AttributeError:
+        pass
+
+
+def set_hub(hub):
+    _threadlocal.hub = hub
+
+
+if sys.version_info[0] >= 3:
+    basestring = (str, bytes)
+
+    def exc_clear():
+        pass
+else:
+    basestring = basestring
+    exc_clear = sys.exc_clear
+
+
+def _import(path):
+    if isinstance(path, list):
+        error = ImportError('Cannot import from empty list: %r' % (path, ))
+        for item in path:
+            try:
+                return _import(item)
+            except ImportError:
+                error = sys.exc_info()[1]
+        raise error
+    if not isinstance(path, basestring):
+        return path
+    module, item = path.rsplit('.', 1)
+    x = __import__(module)
+    for attr in path.split('.')[1:]:
+        x = getattr(x, attr, _NONE)
+        if x is _NONE:
+            raise ImportError('cannot import name %r from %r' % (attr, x))
+    return x
 
 
 class Hub(greenlet):
@@ -145,77 +236,167 @@ class Hub(greenlet):
     It is created automatically by :func:`get_hub`.
     """
 
-    def __init__(self):
-        greenlet.__init__(self)
-        self.keyboard_interrupt_signal = None
+    SYSTEM_ERROR = (KeyboardInterrupt, SystemExit, SystemError)
+    NOT_ERROR = (GreenletExit, SystemExit)
+    loop_class = 'gevent.core.loop'
+    resolver_class = ['gevent.resolver_ares.Resolver',
+                      'gevent.socket.BlockingResolver']
+    format_context = 'pprint.pformat'
 
-    def switch(self):
-        cur = getcurrent()
-        assert cur is not self, 'Cannot switch to MAINLOOP from MAINLOOP'
-        exc_type, exc_value = sys.exc_info()[:2]
-        try:
-            switch_out = getattr(cur, 'switch_out', None)
-            if switch_out is not None:
+    def __init__(self, loop=None, default=None):
+        greenlet.__init__(self)
+        if hasattr(loop, 'run'):
+            if default is not None:
+                raise TypeError("Unexpected argument: default")
+            self.loop = loop
+        else:
+            if default is None:
+                default = get_ident() == MAIN_THREAD
+            loop_class = _import(self.loop_class)
+            self.loop = loop_class(flags=loop, default=default)
+        self._resolver = None
+        self.format_context = _import(self.format_context)
+
+    def __repr__(self):
+        args = (self.__class__.__name__, id(self), self.loop)
+        if self._resolver is not None:
+            args = args + (self._resolver, )
+            return '<%s at 0x%x loop=%r resolver=%r>' % args
+        else:
+            return '<%s at 0x%x loop=%r>' % args
+
+    def handle_error(self, context, type, value, tb):
+        self.print_exception(context, type, value, tb)
+        if context is None or issubclass(type, self.SYSTEM_ERROR):
+            self.handle_system_error(type, value)
+
+    def handle_system_error(self, type, value):
+        current = getcurrent()
+        if current is self or current is self.parent:
+            self.parent.throw(type, value)
+        else:
+            self.loop.run_callback(self.parent.throw, type, value)
+
+    def print_exception(self, context, type, value, tb):
+        if issubclass(type, self.NOT_ERROR):
+            return
+        traceback.print_exception(type, value, tb)
+        del tb
+        if context is not None:
+            if not isinstance(context, str):
                 try:
-                    switch_out()
+                    context = self.format_context(context)
                 except:
                     traceback.print_exc()
-            sys.exc_clear()
+                    context = repr(context)
+            sys.stderr.write('%s failed with %s\n\n' % (context, getattr(type, '__name__', 'exception'), ))
+
+    def switch(self):
+        exc_type, exc_value = sys.exc_info()[:2]
+        try:
+            switch_out = getattr(getcurrent(), 'switch_out', None)
+            if switch_out is not None:
+                switch_out()
+            exc_clear()
             return greenlet.switch(self)
         finally:
             core.set_exc_info(exc_type, exc_value)
 
-    def run(self):
-        global _threadlocal
-        assert self is getcurrent(), 'Do not call run() directly'
+    def switch_out(self):
+        raise AssertionError('Impossible to call blocking function in the event loop callback')
+
+    def wait(self, watcher):
+        unique = object()
+        watcher.start(getcurrent().switch, unique)
         try:
-            self.keyboard_interrupt_signal = signal(2, core.active_event, MAIN.throw, KeyboardInterrupt)
-        except IOError:
-            pass  # no signal() on Windows
-        try:
-            loop_count = 0
-            while True:
-                try:
-                    result = core.dispatch()
-                except IOError, ex:
-                    loop_count += 1
-                    if loop_count > 15:
-                        MAIN.throw(*sys.exc_info())
-                    sys.stderr.write('Restarting gevent.core.dispatch() after an error [%s]: %s\n' % (loop_count, ex))
-                    continue
-                raise DispatchExit(result)
-                # this function must never return, as it will cause switch() in MAIN to return an unexpected value
+            result = self.switch()
+            assert result is unique, 'Invalid switch into %s: %r' % (getcurrent(), result)
         finally:
-            if self.keyboard_interrupt_signal is not None:
-                self.keyboard_interrupt_signal.cancel()
-                self.keyboard_interrupt_signal = None
-            if _threadlocal.__dict__.get('hub') is self:
-                _threadlocal.__dict__.pop('hub')
+            watcher.stop()
 
-    def shutdown(self):
-        assert getcurrent() is MAIN, "Shutting down is only possible from MAIN greenlet"
-        if self.keyboard_interrupt_signal is not None:
-            self.keyboard_interrupt_signal.cancel()
-            self.keyboard_interrupt_signal = None
-        core.dns_shutdown()
-        if not self or self.dead:
-            if _threadlocal.__dict__.get('hub') is self:
-                _threadlocal.__dict__.pop('hub')
-            self.run = None
-            return
+    def cancel_wait(self, watcher, error):
+        if watcher.callback is not None:
+            self.loop.run_callback(self._cancel_wait, watcher, error)
+
+    def _cancel_wait(self, watcher, error):
+        if watcher.active:
+            switch = watcher.callback
+            if switch is not None:
+                greenlet = getattr(switch, '__self__', None)
+                if greenlet is not None:
+                    greenlet.throw(error)
+
+    def run(self):
+        assert self is getcurrent(), 'Do not call Hub.run() directly'
+        while True:
+            loop = self.loop
+            loop.error_handler = self
+            try:
+                loop.run()
+            finally:
+                loop.error_handler = None  # break the refcount cycle
+            self.parent.throw(LoopExit('This operation would block forever'))
+        # this function must never return, as it will cause switch() in the parent greenlet
+        # to return an unexpected value
+        # It is still possible to kill this greenlet with throw. However, in that case
+        # switching to it is no longer safe, as switch will return immediatelly
+
+    def join(self, timeout=None, event=None):
+        """Wait for the event loop to finish. Exits only when there are
+        no more spawned greenlets, started servers, active timeouts or watchers.
+
+        If *timeout* is provided, wait no longer for the specified number of seconds.
+        If *event* was provided, exit when it was signalled with :meth:`Event.set` method.
+
+        Returns True if exited because the loop finished execution.
+        Returns None if exited because of timeout expired or event was signalled.
+        """
+        assert getcurrent() is self.parent, "only possible from the MAIN greenlet"
+        if self.dead:
+            return True
+
+        waiter = Waiter()
+
+        if event is not None:
+            switch = waiter.switch
+            event.rawlink(switch)
+
         try:
-            self.switch()
-        except DispatchExit, ex:
-            if ex.code == 1:  # no more events registered?
-                return
-            raise
+            if timeout is not None:
+                self.loop.update()
+                timeout = self.loop.timer(timeout, ref=False)
+                timeout.start(waiter.switch)
+
+            try:
+                try:
+                    waiter.get()
+                except LoopExit:
+                    return True
+            finally:
+                if timeout is not None:
+                    timeout.stop()
+        finally:
+            if event is not None:
+                event.unlink(switch)
+
+    def _get_resolver(self):
+        if self._resolver is None:
+            if self.resolver_class is not None:
+                self.resolver_class = _import(self.resolver_class)
+                self._resolver = self.resolver_class(hub=self)
+        return self._resolver
+
+    def _set_resolver(self, value):
+        self._resolver = value
+
+    def _del_resolver(self):
+        del self._resolver
+
+    resolver = property(_get_resolver, _set_resolver, _del_resolver)
 
 
-class DispatchExit(Exception):
-
-    def __init__(self, code):
-        self.code = code
-        Exception.__init__(self, code)
+class LoopExit(Exception):
+    pass
 
 
 class Waiter(object):
@@ -232,7 +413,8 @@ class Waiter(object):
     The :meth:`get` method must be called from a greenlet other than :class:`Hub`.
 
         >>> result = Waiter()
-        >>> _ = core.timer(0.1, result.switch, 'hello from Waiter')
+        >>> timer = get_hub().loop.timer(0.1)
+        >>> timer.start(result.switch, 'hello from Waiter')
         >>> result.get() # blocks for 0.1 seconds
         'hello from Waiter'
 
@@ -240,7 +422,8 @@ class Waiter(object):
     :class:`Waiter` stores the value.
 
         >>> result = Waiter()
-        >>> _ = core.timer(0.1, result.switch, 'hi from Waiter')
+        >>> timer = get_hub().loop.timer(0.1)
+        >>> timer.start(result.switch, 'hi from Waiter')
         >>> sleep(0.2)
         >>> result.get() # returns immediatelly without blocking
         'hi from Waiter'
@@ -252,9 +435,18 @@ class Waiter(object):
         :class:`Event`/:class:`AsyncResult`/:class:`Queue` classes.
     """
 
-    __slots__ = ['greenlet', 'value', '_exception']
+    __slots__ = ['hub', 'greenlet', 'value', '_exception']
 
-    def __init__(self):
+    def __init__(self, hub=None):
+        if hub is None:
+            self.hub = get_hub()
+        else:
+            self.hub = hub
+        self.greenlet = None
+        self.value = None
+        self._exception = _NONE
+
+    def clear(self):
         self.greenlet = None
         self.value = None
         self._exception = _NONE
@@ -287,11 +479,11 @@ class Waiter(object):
             self.value = value
             self._exception = None
         else:
-            assert getcurrent() is get_hub(), "Can only use Waiter.switch method from the Hub greenlet"
+            assert getcurrent() is self.hub, "Can only use Waiter.switch method from the Hub greenlet"
             try:
                 self.greenlet.switch(value)
             except:
-                traceback.print_exc()
+                self.hub.handle_error(self.greenlet.switch, *sys.exc_info())
 
     def switch_args(self, *args):
         return self.switch(args)
@@ -301,11 +493,11 @@ class Waiter(object):
         if self.greenlet is None:
             self._exception = throw_args
         else:
-            assert getcurrent() is get_hub(), "Can only use Waiter.switch method from the Hub greenlet"
+            assert getcurrent() is self.hub, "Can only use Waiter.switch method from the Hub greenlet"
             try:
                 self.greenlet.throw(*throw_args)
             except:
-                traceback.print_exc()
+                self.hub.handle_error(self.greenlet.throw, *sys.exc_info())
 
     def get(self):
         """If a value/an exception is stored, return/raise it. Otherwise until switch() or throw() is called."""
@@ -318,11 +510,9 @@ class Waiter(object):
             assert self.greenlet is None, 'This Waiter is already used by %r' % (self.greenlet, )
             self.greenlet = getcurrent()
             try:
-                return get_hub().switch()
+                return self.hub.switch()
             finally:
                 self.greenlet = None
-
-    wait = get  # XXX backward compatibility; will be removed in the next release
 
     def __call__(self, source):
         if source.exception is None:

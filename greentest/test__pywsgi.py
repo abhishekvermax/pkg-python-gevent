@@ -278,7 +278,8 @@ class CommonTests(TestCase):
                 fd.close()
             finally:
                 timeout.cancel()
-        except AssertionError, ex:
+        except AssertionError:
+            ex = sys.exc_info()[1]
             if ex is not exception:
                 raise
 
@@ -294,8 +295,9 @@ class CommonTests(TestCase):
         try:
             result = fd.readline()
             assert not result, 'The remote side is expected to close the connection, but it send %r' % (result, )
-        except socket.error, ex:
-            if ex[0] not in CONN_ABORTED_ERRORS:
+        except socket.error:
+            ex = sys.exc_info()[1]
+            if ex.args[0] not in CONN_ABORTED_ERRORS:
                 raise
 
     def SKIP_test_006_reject_long_urls(self):
@@ -645,20 +647,25 @@ class TestInputN(TestCase):
 
 class TestError(TestCase):
 
-    @staticmethod
-    def application(env, start_response):
-        raise greentest.ExpectedException('TestError.application')
+    error = greentest.ExpectedException('TestError.application')
+    error_fatal = False
+
+    def application(self, env, start_response):
+        raise self.error
 
     def test(self):
+        self.expect_one_error()
         self.urlopen(code=500)
+        self.assert_error(greentest.ExpectedException, self.error)
 
 
 class TestError_after_start_response(TestError):
 
-    @staticmethod
-    def application(env, start_response):
+    error = greentest.ExpectedException('TestError_after_start_response.application')
+
+    def application(self, env, start_response):
         start_response('200 OK', [('Content-Type', 'text/plain')])
-        raise greentest.ExpectedException('TestError_after_start_response.application')
+        raise self.error
 
 
 class TestEmptyYield(TestCase):
@@ -844,7 +851,8 @@ class ChunkedInputTests(TestCase):
         fd.write(req)
         try:
             read_http(fd, body="pong")
-        except AssertionError, ex:
+        except AssertionError:
+            ex = sys.exc_info()[1]
             if str(ex).startswith('Unexpected code: 400'):
                 if not server_implements_chunked:
                     print 'ChunkedNotImplementedWarning'
@@ -862,7 +870,8 @@ class ChunkedInputTests(TestCase):
         read_http(fd, body='this is chunked\nline 2\nline3')
 
     def test_close_before_finished(self):
-        self.hook_stderr()
+        if server_implements_chunked:
+            self.expect_one_error()
         body = '4\r\nthi'
         req = "POST /short-read HTTP/1.1\r\ntransfer-encoding: Chunked\r\n\r\n" + body
         fd = self.connect().makefile(bufsize=1)
@@ -870,7 +879,7 @@ class ChunkedInputTests(TestCase):
         fd.close()
         gevent.sleep(0.01)
         if server_implements_chunked:
-            self.assert_stderr_traceback(IOError, 'unexpected end of file while parsing chunked data')
+            self.assert_error(IOError, 'unexpected end of file while parsing chunked data')
 
 
 class Expect100ContinueTests(TestCase):
@@ -891,7 +900,8 @@ class Expect100ContinueTests(TestCase):
         fd.write('PUT / HTTP/1.1\r\nHost: localhost\r\nContent-length: 1025\r\nExpect: 100-continue\r\n\r\n')
         try:
             read_http(fd, code=417, body="failure")
-        except AssertionError, ex:
+        except AssertionError:
+            ex = sys.exc_info()[1]
             if str(ex).startswith('Unexpected code: 400'):
                 if not server_implements_100continue:
                     print '100ContinueNotImplementedWarning'
@@ -1015,6 +1025,23 @@ class TestSubclass1(TestCase):
         fd = self.makefile()
         fd.write('<policy-file-XXXuest/>\x00')
         self.assertEqual(fd.read(), '')
+
+
+class TestErrorAfterChunk(TestCase):
+    validator = None
+
+    @staticmethod
+    def application(env, start_response):
+        start_response('200 OK', [('Content-Type', 'text/plain')])
+        yield "hello"
+        raise greentest.ExpectedException('TestErrorAfterChunk')
+
+    def test(self):
+        fd = self.connect().makefile(bufsize=1)
+        self.expect_one_error()
+        fd.write('GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n')
+        self.assertRaises(ValueError, read_http, fd)
+        self.assert_error(greentest.ExpectedException)
 
 
 del CommonTests

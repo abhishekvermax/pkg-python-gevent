@@ -1,7 +1,9 @@
-from greentest import TestCase, main
+from greentest import TestCase, main, GenericGetTestCase
 import gevent
-from gevent import util, core
+from gevent.hub import get_hub
+from gevent import util
 from gevent import queue
+from gevent.queue import Empty, Full
 from gevent.event import AsyncResult
 
 
@@ -54,7 +56,7 @@ class TestQueue(TestCase):
         assert p.get(timeout=0) == "OK"
 
     def test_zero_max_size(self):
-        q = queue.Queue(0)
+        q = queue.Channel()
 
         def sender(evt, q):
             q.put('hi')
@@ -161,7 +163,7 @@ class TestQueue(TestCase):
         waiting_evt = AsyncResult()
         gevent.spawn(do_receive, q, dying_evt)
         gevent.spawn(waiter, q, waiting_evt)
-        gevent.sleep(0)
+        gevent.sleep(0.01)
         q.put('hi')
         self.assertEquals(dying_evt.get(), 'timed out')
         self.assertEquals(waiting_evt.get(), 'hi')
@@ -181,7 +183,7 @@ class TestQueue(TestCase):
         e2 = AsyncResult()
         gevent.spawn(do_receive, q, e1)
         gevent.spawn(do_receive, q, e2)
-        gevent.sleep(0)
+        gevent.sleep(0.01)
         q.put('sent')
         self.assertEquals(e1.get(), 'timed out')
         self.assertEquals(e2.get(), 'timed out')
@@ -191,7 +193,7 @@ class TestQueue(TestCase):
 class TestChannel(TestCase):
 
     def test_send(self):
-        channel = queue.Queue(0)
+        channel = queue.Channel()
 
         events = []
 
@@ -211,7 +213,7 @@ class TestChannel(TestCase):
         g.get()
 
     def test_wait(self):
-        channel = queue.Queue(0)
+        channel = queue.Channel()
         events = []
 
         def another_greenlet():
@@ -252,8 +254,10 @@ class TestNoWait(TestCase):
         def store_result(func, *args):
             result.append(func(*args))
 
-        core.active_event(store_result, util.wrap_errors(Exception, q.put_nowait), 2)
-        core.active_event(store_result, util.wrap_errors(Exception, q.put_nowait), 3)
+        run_callback = get_hub().loop.run_callback
+
+        run_callback(store_result, util.wrap_errors(Full, q.put_nowait), 2)
+        run_callback(store_result, util.wrap_errors(Full, q.put_nowait), 3)
         gevent.sleep(0)
         assert len(result) == 2, result
         assert result[0] == None, result
@@ -267,8 +271,10 @@ class TestNoWait(TestCase):
         def store_result(func, *args):
             result.append(func(*args))
 
-        core.active_event(store_result, util.wrap_errors(Exception, q.get_nowait))
-        core.active_event(store_result, util.wrap_errors(Exception, q.get_nowait))
+        run_callback = get_hub().loop.run_callback
+
+        run_callback(store_result, util.wrap_errors(Empty, q.get_nowait))
+        run_callback(store_result, util.wrap_errors(Empty, q.get_nowait))
         gevent.sleep(0)
         assert len(result) == 2, result
         assert result[0] == 4, result
@@ -277,7 +283,26 @@ class TestNoWait(TestCase):
     # get_nowait must work from the mainloop
     def test_get_nowait_unlock(self):
         result = []
-        q = queue.Queue(0)
+        q = queue.Queue(1)
+        p = gevent.spawn(q.put, 5)
+
+        def store_result(func, *args):
+            result.append(func(*args))
+
+        assert q.empty(), q
+        gevent.sleep(0)
+        assert q.full(), q
+        get_hub().loop.run_callback(store_result, q.get_nowait)
+        gevent.sleep(0)
+        assert q.empty(), q
+        assert result == [5], result
+        assert p.ready(), p
+        assert p.dead, p
+        assert q.empty(), q
+
+    def test_get_nowait_unlock_channel(self):
+        result = []
+        q = queue.Channel()
         p = gevent.spawn(q.put, 5)
 
         def store_result(func, *args):
@@ -288,7 +313,7 @@ class TestNoWait(TestCase):
         gevent.sleep(0)
         assert q.empty(), q
         assert q.full(), q
-        core.active_event(store_result, util.wrap_errors(Exception, q.get_nowait))
+        get_hub().loop.run_callback(store_result, q.get_nowait)
         gevent.sleep(0)
         assert q.empty(), q
         assert q.full(), q
@@ -300,23 +325,23 @@ class TestNoWait(TestCase):
     # put_nowait must work from the mainloop
     def test_put_nowait_unlock(self):
         result = []
-        q = queue.Queue(0)
+        q = queue.Queue()
         p = gevent.spawn(q.get)
 
         def store_result(func, *args):
             result.append(func(*args))
 
         assert q.empty(), q
-        assert q.full(), q
+        assert not q.full(), q
         gevent.sleep(0)
         assert q.empty(), q
-        assert q.full(), q
-        core.active_event(store_result, util.wrap_errors(Exception, q.put_nowait), 10)
+        assert not q.full(), q
+        get_hub().loop.run_callback(store_result, q.put_nowait, 10)
         assert not p.ready(), p
         gevent.sleep(0)
         assert result == [None], result
         assert p.ready(), p
-        assert q.full(), q
+        assert not q.full(), q
         assert q.empty(), q
 
 
@@ -327,6 +352,49 @@ class TestJoinEmpty(TestCase):
         self.switch_expected = False
         q = queue.JoinableQueue()
         q.join()
+
+
+def test_get_interrupt(queue_type):
+
+    class TestGetInterrupt(GenericGetTestCase):
+
+        Timeout = Empty
+
+        def wait(self, timeout):
+            return queue_type().get(timeout=timeout)
+
+    TestGetInterrupt.__name__ += '_' + queue_type.__name__
+    return TestGetInterrupt
+
+
+for queue_type in [queue.Queue, queue.JoinableQueue, queue.LifoQueue, queue.PriorityQueue, queue.Channel]:
+    klass = test_get_interrupt(queue_type)
+    globals()[klass.__name__] = klass
+del klass, queue_type
+
+
+def test_put_interrupt(queue):
+
+    class TestPutInterrupt(GenericGetTestCase):
+
+        Timeout = Full
+
+        def wait(self, timeout):
+            while not queue.full():
+                queue.put(1)
+            return queue.put(2, timeout=timeout)
+
+    TestPutInterrupt.__name__ += '_' + queue.__class__.__name__
+    return TestPutInterrupt
+
+
+for obj in [queue.Queue(1), queue.JoinableQueue(1), queue.LifoQueue(1), queue.PriorityQueue(1), queue.Channel()]:
+    klass = test_put_interrupt(obj)
+    globals()[klass.__name__] = klass
+del klass, obj
+
+
+del GenericGetTestCase
 
 
 if __name__ == '__main__':

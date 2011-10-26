@@ -1,4 +1,4 @@
-# Copyright (c) 2009-2010 Denis Bilenko. See LICENSE for details.
+# Copyright (c) 2009-2011 Denis Bilenko. See LICENSE for details.
 """
 gevent is a coroutine-based Python networking library that uses greenlet
 to provide a high-level synchronous API on top of libevent event loop.
@@ -6,17 +6,18 @@ to provide a high-level synchronous API on top of libevent event loop.
 See http://www.gevent.org/ for the documentation.
 """
 
-version_info = (0, 13, 6)
-__version__ = '0.13.6'
-__changeset__ = '1734:6c834b912c36'
+version_info = (1, 0, 0, 'alpha', 3)
+__version__ = '1.0a3'
+__changeset__ = '2104:28284d2bf12b'
+# 'dev' in version_info should be replaced with alpha|beta|candidate|final
+# 'dev' in __version__ should be replaced with a|b|rc|<empty string>
 
-__all__ = ['Greenlet',
+
+__all__ = ['get_hub',
+           'Greenlet',
            'GreenletExit',
            'spawn',
            'spawn_later',
-           'spawn_link',
-           'spawn_link_value',
-           'spawn_link_exception',
            'spawn_raw',
            'joinall',
            'killall',
@@ -24,12 +25,12 @@ __all__ = ['Greenlet',
            'with_timeout',
            'getcurrent',
            'sleep',
+           'idle',
            'kill',
            'signal',
            'fork',
-           'shutdown',
-           'core',
-           'reinit']
+           'reinit',
+           'run']
 
 
 import sys
@@ -38,23 +39,22 @@ if sys.platform == 'win32':
 del sys
 
 
-from gevent import core
-core.EV_TIMEOUT = 0x01
-core.EV_READ    = 0x02
-core.EV_WRITE   = 0x04
-core.EV_SIGNAL  = 0x08
-core.EV_PERSIST = 0x10
-
-from gevent.core import reinit
+from gevent.hub import get_hub
 from gevent.greenlet import Greenlet, joinall, killall
 spawn = Greenlet.spawn
 spawn_later = Greenlet.spawn_later
-spawn_link = Greenlet.spawn_link
-spawn_link_value = Greenlet.spawn_link_value
-spawn_link_exception = Greenlet.spawn_link_exception
 from gevent.timeout import Timeout, with_timeout
-from gevent.hub import getcurrent, GreenletExit, spawn_raw, sleep, kill, signal, shutdown
+from gevent.hub import getcurrent, GreenletExit, spawn_raw, sleep, idle, kill, signal
 try:
     from gevent.hub import fork
 except ImportError:
     __all__.remove('fork')
+
+
+
+def reinit():
+    return get_hub().loop.reinit()
+
+
+def run(timeout=None, event=None):
+    return get_hub().join(timeout=timeout, event=event)
