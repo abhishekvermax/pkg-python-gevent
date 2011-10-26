@@ -3,6 +3,7 @@ from gevent import socket
 import gevent
 from gevent.server import StreamServer
 import errno
+import sys
 import os
 
 
@@ -16,7 +17,7 @@ class SimpleStreamServer(StreamServer):
         try:
             method, path, rest = request_line.split(' ', 3)
         except Exception:
-            print 'Failed to parse request line: %r' % (request_line, )
+            print ('Failed to parse request line: %r' % (request_line, ))
             raise
         if path == '/ping':
             client_socket.sendall('HTTP/1.0 200 OK\r\n\r\nPONG')
@@ -51,8 +52,9 @@ class Settings:
         # attempt to send anything reset the connection
         try:
             self.send_request()
-        except socket.error, ex:
-            if ex[0] != errno.ECONNRESET:
+        except socket.error:
+            ex = sys.exc_info()[1]
+            if ex.args[0] != errno.ECONNRESET:
                 raise
 
     @staticmethod
@@ -91,8 +93,9 @@ class TestCase(greentest.TestCase):
         try:
             conn = self.makefile()
             raise AssertionError('Connection was not refused: %r' % (conn._sock, ))
-        except socket.error, ex:
-            if ex[0] not in (errno.ECONNREFUSED, errno.EADDRNOTAVAIL):
+        except socket.error:
+            ex = sys.exc_info()[1]
+            if ex.args[0] not in (errno.ECONNREFUSED, errno.EADDRNOTAVAIL):
                 raise
 
     def assert500(self):
@@ -140,9 +143,9 @@ class TestCase(greentest.TestCase):
 
     def report_netstat(self, msg):
         return
-        print msg
+        print (msg)
         os.system('sudo netstat -anp | grep %s' % os.getpid())
-        print '^^^^^'
+        print ('^^^^^')
 
     def init_server(self):
         self.server = self.ServerSubClass(('127.0.0.1', 0))
@@ -155,12 +158,11 @@ class TestCase(greentest.TestCase):
 
     def _test_invalid_callback(self):
         try:
-            self.hook_stderr()
+            self.expect_one_error()
             self.server = self.ServerClass(('127.0.0.1', 0), lambda: None)
             self.server.start()
             self.assert500()
-            self.assert_stderr_traceback('TypeError')
-            self.assert_stderr(self.invalid_callback_message)
+            self.assert_error(TypeError)
         finally:
             self.server.stop()
 
@@ -174,8 +176,6 @@ class TestCase(greentest.TestCase):
 
 
 class TestDefaultSpawn(TestCase):
-
-    invalid_callback_message = '<Greenlet failed with TypeError'
 
     def get_spawn(self):
         return gevent.spawn
@@ -225,7 +225,7 @@ class TestDefaultSpawn(TestCase):
         self._test_invalid_callback()
 
     def _test_serve_forever(self):
-        g = gevent.spawn_link_exception(self.server.serve_forever)
+        g = gevent.spawn(self.server.serve_forever)
         try:
             gevent.sleep(0.01)
             self.assertRequestSucceeded()
@@ -234,6 +234,7 @@ class TestDefaultSpawn(TestCase):
             self.assertConnectionRefused()
         finally:
             g.kill()
+            g.get()
 
     def test_serve_forever(self):
         self.server = self.ServerSubClass(('127.0.0.1', 0))
@@ -260,8 +261,13 @@ class TestDefaultSpawn(TestCase):
                 result = conn.read()
                 if result:
                     assert result.startswith('HTTP/1.0 500 Internal Server Error'), repr(result)
-            except socket.error, ex:
-                if ex[0] != errno.ECONNRESET:
+            except socket.error:
+                ex = sys.exc_info()[1]
+                if ex.args[0] == 10053:
+                    pass # "established connection was aborted by the software in your host machine"
+                elif ex.args[0] == errno.ECONNRESET:
+                    pass
+                else:
                     raise
         finally:
             timeout.cancel()
@@ -279,13 +285,11 @@ class TestDefaultSpawn(TestCase):
     def test_error_in_spawn(self):
         self.init_server()
         assert self.server.started
-        self.hook_stderr()
         error = ExpectedError('test_error_in_spawn')
         self.server._spawn = lambda *args: gevent.getcurrent().throw(error)
+        self.expect_one_error()
         self.assertAcceptedConnectionError()
-        self.assert_stderr_traceback(error)
-        #self.assert_stderr('^WARNING: <SimpleStreamServer .*?>: ignoring test_error_in_spawn \\(sleeping \d.\d+ seconds\\)\n$')
-        self.assert_stderr('<.*?>: Failed to handle...')
+        self.assert_error(ExpectedError, error)
         return
         if Settings.restartable:
             assert not self.server.started
@@ -296,8 +300,6 @@ class TestDefaultSpawn(TestCase):
 
 
 class TestRawSpawn(TestDefaultSpawn):
-
-    invalid_callback_message = 'Failed active_event...'
 
     def get_spawn(self):
         return gevent.spawn_raw
@@ -323,10 +325,10 @@ class TestPoolSpawn(TestDefaultSpawn):
         gevent.sleep(0.1)
         self.assertRequestSucceeded()
 
+    test_pool_full.error_fatal = False
+
 
 class TestNoneSpawn(TestCase):
-
-    invalid_callback_message = '<.*?>: Failed to handle'
 
     def get_spawn(self):
         return None
@@ -339,9 +341,9 @@ class TestNoneSpawn(TestCase):
             gevent.sleep(0)
         self.server = Settings.ServerClass(('127.0.0.1', 0), sleep, spawn=None)
         self.server.start()
-        self.hook_stderr()
+        self.expect_one_error()
         self.assert500()
-        self.assert_mainloop_assertion(self.invalid_callback_message)
+        self.assert_error(AssertionError, 'Impossible to call blocking function in the event loop callback')
 
 
 class ExpectedError(Exception):

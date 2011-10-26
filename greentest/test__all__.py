@@ -5,7 +5,6 @@ import types
 from greentest import walk_modules
 
 
-SKIP = ['sslold']
 MAPPING = {'gevent.local': '_threading_local'}
 
 
@@ -18,8 +17,7 @@ ANY = ANY()
 NOT_IMPLEMENTED = {
     'socket': ['CAPI', 'gethostbyaddr', 'gethostbyname_ex', 'getnameinfo'],
     'thread': ['allocate', 'exit_thread', 'interrupt_main', 'start_new'],
-    'select': ANY,
-    'httplib': ANY}
+    'select': ANY}
 
 COULD_BE_MISSING = {
     'socket': ['create_connection', 'RAND_add', 'RAND_egd', 'RAND_status']}
@@ -57,8 +55,13 @@ class Test(unittest.TestCase):
     def check_implements_subset_of_stdlib_all(self):
         "Check that __implements__ + __imports__ is a subset of the corresponding standard module __all__ or dir()"
         for name in self.__implements__ + self.__imports__:
-            if name not in self.stdlib_all and name not in COULD_BE_MISSING.get(self.stdlib_name, []):
-                raise AssertionError('%r is not found in %r.__all__' % (name, self.stdlib_module))
+            if name in self.stdlib_all:
+                continue
+            if name in COULD_BE_MISSING.get(self.stdlib_name, []):
+                continue
+            if name in dir(self.stdlib_module):  # like thread._local which is not in thread.__all__
+                continue
+            raise AssertionError('%r is not found in %r.__all__ nor in dir(%r)' % (name, self.stdlib_module, self.stdlib_module))
 
     def check_implements_actually_implements(self):
         """Check that the module actually implements the entries from __implements__"""
@@ -102,7 +105,7 @@ class Test(unittest.TestCase):
             result = []
             for name in missed[:]:
                 if name in not_implemented:
-                    print 'IncompleteImplWarning: gevent.%s.%s' % (self.modname, name)
+                    print ('IncompleteImplWarning: %s.%s' % (self.modname, name))
                 else:
                     result.append(name)
             missed = result
@@ -160,9 +163,8 @@ are missing from %r:
         self.check_completeness()
 
     for path, modname in walk_modules(include_so=True):
-        modname = modname.replace('gevent.', '')
-        if modname not in SKIP:
-            exec '''def test_%s(self): self._test("gevent.%s")''' % (modname, modname)
+        modname = modname.replace('gevent.', '').split('.')[0]
+        exec ('''def test_%s(self): self._test("gevent.%s")''' % (modname, modname))
     del path, modname
 
 

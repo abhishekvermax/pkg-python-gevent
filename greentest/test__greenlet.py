@@ -26,9 +26,10 @@ import re
 from gevent import sleep, with_timeout, getcurrent
 from gevent import greenlet
 from gevent.event import AsyncResult
-from gevent.queue import Queue
+from gevent.queue import Queue, Channel
 
 DELAY = 0.01
+greentest.TestCase.error_fatal = False
 
 
 class ExpectedError(Exception):
@@ -88,7 +89,7 @@ class TestLink(greentest.TestCase):
         for i in xrange(3):
             event2 = AsyncResult()
             p.link(event2)
-            self.assertRaises(err, event.get)
+            self.assertRaises(err, event2.get)
 
     def test_link_to_queue(self):
         p = gevent.spawn(lambda: 100)
@@ -104,7 +105,7 @@ class TestLink(greentest.TestCase):
         p1 = gevent.spawn(lambda: 101)
         p2 = gevent.spawn(lambda: 102)
         p3 = gevent.spawn(lambda: 103)
-        q = Queue(0)
+        q = Channel()
         p1.link(q.put)
         p2.link(q.put)
         p3.link(q.put)
@@ -221,7 +222,7 @@ class LinksTestCase(greentest.TestCase):
         myproc = gevent.spawn(self.myprocf, proc_finished_flag)
         link(myproc)
 
-        queue = Queue(0)
+        queue = Channel()
         link(queue.put)
         return event, myproc, proc_finished_flag, queue
 
@@ -380,15 +381,11 @@ class TestStuff(greentest.TestCase):
             sleep(DELAY)
             return 1
         x = gevent.spawn(x)
-        z = gevent.spawn(lambda: 3)
         y = gevent.spawn(lambda: getcurrent().throw(ExpectedError('test_wait_error')))
-        y.link(x)
         x.link(y)
-        y.link(z)
-        z.link(y)
-        self.assertRaises(ExpectedError, gevent.joinall, [x, y, z], raise_error=True)
+        y.link(x)
+        self.assertRaises(ExpectedError, gevent.joinall, [x, y], raise_error=True)
         self.assertRaises(greenlet.LinkedFailed, gevent.joinall, [x], raise_error=True)
-        self.assertEqual(z.get(), 3)
         self.assertRaises(ExpectedError, gevent.joinall, [y], raise_error=True)
 
     def test_joinall_exception_order(self):
@@ -400,7 +397,8 @@ class TestStuff(greentest.TestCase):
         b = gevent.spawn(lambda: getcurrent().throw(ExpectedError('second')))
         try:
             gevent.joinall([a, b], raise_error=True)
-        except ExpectedError, ex:
+        except ExpectedError:
+            ex = sys.exc_info()[1]
             assert 'second' in str(ex), repr(str(ex))
         gevent.joinall([a, b])
 
@@ -488,8 +486,9 @@ class TestStuff(greentest.TestCase):
                 raise ExpectedError('test_killing_unlinked')
             except:
                 e.set_exception(sys.exc_info()[1])
+                gevent.sleep(0)
 
-        p = gevent.spawn_link(func)
+        p = gevent.Greenlet.spawn_link(func)
         try:
             try:
                 e.wait()
@@ -576,7 +575,7 @@ class TestBasic(greentest.TestCase):
 
         g = gevent.Greenlet(func, 0.01, return_value=5)
         g.link(lambda x: link_test.append(x))
-        assert not g
+        assert not g, bool(g)
         assert not g.dead
         assert not g.started
         assert not g.ready()
@@ -585,7 +584,7 @@ class TestBasic(greentest.TestCase):
         assert g.exception is None
 
         g.start()
-        assert not g
+        assert g  # changed
         assert not g.dead
         assert g.started  # changed
         assert not g.ready()
@@ -594,7 +593,7 @@ class TestBasic(greentest.TestCase):
         assert g.exception is None
 
         gevent.sleep(0.001)
-        assert g  # changed
+        assert g
         assert not g.dead
         assert g.started
         assert not g.ready()
@@ -717,6 +716,23 @@ class TestBasic(greentest.TestCase):
 
     def test_kill_running_noblock(self):
         self._test_kill_running(block=False)
+
+
+class TestStart(greentest.TestCase):
+
+    def test(self):
+        g = gevent.spawn(gevent.sleep, 0.01)
+        assert g.started
+        assert not g.dead
+        g.start()
+        assert g.started
+        assert not g.dead
+        g.join()
+        assert not g.started
+        assert g.dead
+        g.start()
+        assert not g.started
+        assert g.dead
 
 
 def assert_ready(g):

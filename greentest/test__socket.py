@@ -1,4 +1,5 @@
 import os
+import sys
 import gevent
 from gevent import socket
 import greentest
@@ -11,7 +12,7 @@ class TestTCP(greentest.TestCase):
 
     def setUp(self):
         greentest.TestCase.setUp(self)
-        self.listener = socket.tcp_listener(('127.0.0.1', 0))
+        self.listener = greentest.tcp_listener(('127.0.0.1', 0))
 
     def tearDown(self):
         del self.listener
@@ -26,22 +27,18 @@ class TestTCP(greentest.TestCase):
             (client, addr) = self.listener.accept()
             # start reading, then, while reading, start writing. the reader should not hang forever
             N = 100000  # must be a big enough number so that sendall calls trampoline
-            sender = gevent.spawn_link_exception(client.sendall, 't' * N)
+            sender = gevent.spawn(client.sendall, 't' * N)
             result = client.recv(1000)
             assert result == 'hello world', result
-            sender.join(0.2)
+            sender.join(timeout=0.2)
             sender.kill()
-            if client.__class__.__name__ == 'SSLObject':
-                # if sslold.SSLObject is not closed then the other end will receive sslerror: (8, 'Unexpected EOF')
-                # Not sure if it must be fixed but I don't want to waste time on that since
-                # the preferred way to do ssl now is via gevent.ssl which works OK without explicit close
-                client.close()
+            sender.get()
 
         #print '%s: client' % getcurrent()
 
-        server_proc = gevent.spawn_link_exception(server)
+        server_proc = gevent.spawn(server)
         client = self.create_connection()
-        client_reader = gevent.spawn_link_exception(client.makefile().read)
+        client_reader = gevent.spawn(client.makefile().read)
         gevent.sleep(0.001)
         client.send('hello world')
 
@@ -54,7 +51,7 @@ class TestTCP(greentest.TestCase):
         client_reader.get()
 
     def test_recv_timeout(self):
-        acceptor = gevent.spawn_link_exception(self.listener.accept)
+        acceptor = gevent.spawn(self.listener.accept)
         try:
             client = self.create_connection()
             client.settimeout(0.1)
@@ -69,7 +66,7 @@ class TestTCP(greentest.TestCase):
             acceptor.get()
 
     def test_sendall_timeout(self):
-        acceptor = gevent.spawn_link_exception(self.listener.accept)
+        acceptor = gevent.spawn(self.listener.accept)
         try:
             client = self.create_connection()
             client.settimeout(0.1)
@@ -131,28 +128,31 @@ if hasattr(socket, 'ssl'):
         import _socket
         r = _socket.socket()
         sock = socket.ssl(r, private_key, certificate)
-        socket.bind_and_listen(sock, address)
+        greentest.bind_and_listen(sock, address)
         return sock
+
+
+def get_port():
+    tempsock = socket.socket()
+    tempsock.bind(('', 0))
+    port = tempsock.getsockname()[1]
+    tempsock.close()
+    return port
 
 
 class TestCreateConnection(greentest.TestCase):
 
+    __timeout__ = 5
+
     def test(self):
-        tempsock1 = socket.socket()
-        tempsock1.bind(('', 0))
-        source_port = tempsock1.getsockname()[1]
-        tempsock2 = socket.socket()
-        tempsock2.bind(('', 0))
-        tempsock2.getsockname()[1]
-        tempsock1.close()
-        del tempsock1
-        tempsock2.close()
-        del tempsock2
         try:
-            socket.create_connection(('localhost', 4), timeout=30, source_address=('', source_port))
-        except socket.error, ex:
-            if 'connection refused' not in str(ex).lower():
+            socket.create_connection(('localhost', get_port()), timeout=30, source_address=('', get_port()))
+        except socket.error:
+            ex = sys.exc_info()[1]
+            if 'refused' not in str(ex).lower():
                 raise
+        else:
+            raise AssertionError('create_connection did not raise socket.error as expected')
 
 
 if __name__ == '__main__':

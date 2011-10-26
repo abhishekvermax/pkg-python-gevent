@@ -3,7 +3,10 @@ import os
 import glob
 from os.path import join, abspath, dirname, normpath, basename
 import unittest
-import urllib2
+try:
+    import urllib2
+except ImportError:
+    from urllib import request as urllib2
 import time
 import signal
 import re
@@ -23,10 +26,14 @@ for example in examples:
     if 'serve_forever' not in open(example).read():
         simple_examples.append(example)
 
-print '\n'.join(examples)
+print ('\n'.join(examples))
 
 
 def make_test(path):
+
+    if sys.platform == 'win32' and os.path.basename(path) in ('geventsendfile.py', 'processes.py'):
+        print 'Ignoring', path
+        return
 
     if ' ' in path:
         path = '"%s"' % path
@@ -49,8 +56,9 @@ def make_test(path):
 
 for example in simple_examples:
     test = make_test(example)
-    globals()[test.__name__] = test
-    print 'Added %s' % test.__name__
+    if test is not None:
+        globals()[test.__name__] = test
+        print ('Added %s' % test.__name__)
     del test
 
 
@@ -67,7 +75,6 @@ class BaseTestServer(unittest.TestCase):
 
 
 class Test_httpserver(BaseTestServer):
-    path = 'httpserver.py'
     URL = 'http://localhost:8088'
     not_found_message = '<h1>Not Found</h1>'
 
@@ -75,8 +82,8 @@ class Test_httpserver(BaseTestServer):
         url = self.URL + path
         try:
             response = urllib2.urlopen(url)
-        except urllib2.HTTPError, response:
-            pass
+        except urllib2.HTTPError:
+            response = sys.exc_info()[1]
         return '%s %s' % (response.code, response.msg), response.read()
 
     def _test_hello(self):
@@ -180,9 +187,10 @@ class Test_echoserver(BaseTestServer):
             self.assertEqual(received, message)
             conn._sock.settimeout(0.1)
             self.assertRaises(socket.timeout, conn.read, 1)
-        client1 = gevent.spawn_link_exception(test_client, 'hello\r\n')
-        client2 = gevent.spawn_link_exception(test_client, 'world\r\n')
-        gevent.joinall([client1, client2])
+        client1 = gevent.spawn(test_client, 'hello\r\n')
+        client2 = gevent.spawn(test_client, 'world\r\n')
+        gevent.joinall([client1, client2], raise_error=True)
+
 
 
 class TestAllTested(unittest.TestCase):
@@ -197,6 +205,9 @@ class TestAllTested(unittest.TestCase):
         untested = set(examples) - set(simple_examples)
         untested = set(basename(path) for path in untested) - tests
         assert not untested, 'The following examples have not been tested: %s' % '\n'.join(untested)
+
+
+del Test_httpserver
 
 
 if __name__ == '__main__':

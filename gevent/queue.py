@@ -1,20 +1,13 @@
-# Copyright (c) 2009-2010 Denis Bilenko. See LICENSE for details.
+# Copyright (c) 2009-2011 Denis Bilenko. See LICENSE for details.
 """Synchronized queues.
 
 The :mod:`gevent.queue` module implements multi-producer, multi-consumer queues
 that work across greenlets, with the API similar to the classes found in the
 standard :mod:`Queue` and :class:`multiprocessing <multiprocessing.Queue>` modules.
 
-A major difference is that queues in this module operate as channels when
-initialized with *maxsize* of zero. In such case, both :meth:`Queue.empty`
-and :meth:`Queue.full` return ``True`` and :meth:`Queue.put` always blocks until a call
-to :meth:`Queue.get` retrieves the item.
+Changed in version 1.0: Queue(0) now means queue of infinite size, not a channel.
 
-Another interesting difference is that :meth:`Queue.qsize`, :meth:`Queue.empty`, and
-:meth:`Queue.full` *can* be used as indicators of whether the subsequent :meth:`Queue.get`
-or :meth:`Queue.put` will not block.
-
-Additionally, queues in this module implement iterator protocol. Iterating over queue
+The classes in this module implement iterator protocol. Iterating over queue
 means repeatedly calling :meth:`get <Queue.get>` until :meth:`get <Queue.get>` returns ``StopIteration``.
 
     >>> queue = gevent.queue.Queue()
@@ -30,14 +23,19 @@ means repeatedly calling :meth:`get <Queue.get>` until :meth:`get <Queue.get>` r
 import sys
 import heapq
 import collections
-from Queue import Full, Empty
+
+try:
+    from Queue import Full, Empty
+except ImportError:
+    __queue__ = __import__('queue')
+    Full = __queue__.Full
+    Empty = __queue__.Empty
 
 from gevent.timeout import Timeout
-from gevent.hub import get_hub, Waiter, getcurrent, _NONE
-from gevent import core
+from gevent.hub import get_hub, Waiter, getcurrent
 
 
-__all__ = ['Queue', 'PriorityQueue', 'LifoQueue', 'JoinableQueue']
+__all__ = ['Queue', 'PriorityQueue', 'LifoQueue', 'JoinableQueue', 'Channel']
 
 
 class Queue(object):
@@ -51,13 +49,18 @@ class Queue(object):
     """
 
     def __init__(self, maxsize=None):
-        if maxsize < 0:
+        if maxsize <= 0:
             self.maxsize = None
+            if maxsize == 0:
+                import warnings
+                warnings.warn('Queue(0) now equivalent to Queue(None); if you want a channel, use Channel',
+                              DeprecationWarning, stacklevel=2)
         else:
             self.maxsize = maxsize
         self.getters = set()
         self.putters = set()
-        self._event_unlock = None
+        self.hub = get_hub()
+        self._event_unlock = self.hub.loop.callback()
         self._init(maxsize)
 
     # QQQ make maxsize into a property with setter that schedules unlock if necessary
@@ -67,6 +70,9 @@ class Queue(object):
 
     def _get(self):
         return self.queue.popleft()
+
+    def _peek(self):
+        return self.queue[0]
 
     def _put(self, item):
         self.queue.append(item)
@@ -85,8 +91,6 @@ class Queue(object):
             result += ' getters[%s]' % len(self.getters)
         if self.putters:
             result += ' putters[%s]' % len(self.putters)
-        if self._event_unlock is not None:
-            result += ' unlocking'
         return result
 
     def qsize(self):
@@ -102,7 +106,7 @@ class Queue(object):
 
         ``Queue(None)`` is never full.
         """
-        return self.qsize() >= self.maxsize
+        return self.maxsize is not None and self.qsize() >= self.maxsize
 
     def put(self, item, block=True, timeout=None):
         """Put an item into the queue.
@@ -120,19 +124,18 @@ class Queue(object):
             self._put(item)
             if self.getters:
                 self._schedule_unlock()
-        elif not block and get_hub() is getcurrent():
-            # we're in the mainloop, so we cannot wait; we can switch() to other greenlets though
-            # find a getter and deliver an item to it
-            while self.getters:
+        elif self.hub is getcurrent():
+            # We're in the mainloop, so we cannot wait; we can switch() to other greenlets though.
+            # Check if possible to get a free slot in the queue.
+            while self.getters and self.qsize() and self.qsize() >= self.maxsize:
                 getter = self.getters.pop()
-                if getter:
-                    self._put(item)
-                    item = self._get()
-                    getter.switch(item)
-                    return
+                getter.switch(getter)
+            if self.qsize() < self.maxsize:
+                self._put(item)
+                return
             raise Full
         elif block:
-            waiter = ItemWaiter(item)
+            waiter = ItemWaiter(item, self)
             self.putters.add(waiter)
             timeout = Timeout.start_new(timeout, Full)
             try:
@@ -140,8 +143,6 @@ class Queue(object):
                     self._schedule_unlock()
                 result = waiter.get()
                 assert result is waiter, "Invalid switch into Queue.put: %r" % (result, )
-                if waiter.item is not _NONE:
-                    self._put(item)
             finally:
                 timeout.cancel()
                 self.putters.discard(waiter)
@@ -170,15 +171,13 @@ class Queue(object):
             if self.putters:
                 self._schedule_unlock()
             return self._get()
-        elif not block and get_hub() is getcurrent():
+        elif self.hub is getcurrent():
             # special case to make get_nowait() runnable in the mainloop greenlet
             # there are no items in the queue; try to fix the situation by unlocking putters
             while self.putters:
-                putter = self.putters.pop()
-                if putter:
-                    putter.switch(putter)
-                    if self.qsize():
-                        return self._get()
+                self.putters.pop().put_and_switch()
+                if self.qsize():
+                    return self._get()
             raise Empty
         elif block:
             waiter = Waiter()
@@ -187,7 +186,9 @@ class Queue(object):
                 self.getters.add(waiter)
                 if self.putters:
                     self._schedule_unlock()
-                return waiter.get()
+                result = waiter.get()
+                assert result is waiter, 'Invalid switch into Queue.get: %r' % (result, )
+                return self._get()
             finally:
                 self.getters.discard(waiter)
                 timeout.cancel()
@@ -202,46 +203,70 @@ class Queue(object):
         """
         return self.get(False)
 
+    def peek(self, block=True, timeout=None):
+        """Return an item from the queue without removing it.
+
+        If optional args *block* is true and *timeout* is ``None`` (the default),
+        block if necessary until an item is available. If *timeout* is a positive number,
+        it blocks at most *timeout* seconds and raises the :class:`Empty` exception
+        if no item was available within that time. Otherwise (*block* is false), return
+        an item if one is immediately available, else raise the :class:`Empty` exception
+        (*timeout* is ignored in that case).
+        """
+        if self.qsize():
+            return self._peek()
+        elif self.hub is getcurrent():
+            # special case to make peek(False) runnable in the mainloop greenlet
+            # there are no items in the queue; try to fix the situation by unlocking putters
+            while self.putters:
+                self.putters.pop().put_and_switch()
+                if self.qsize():
+                    return self._peek()
+            raise Empty
+        elif block:
+            waiter = Waiter()
+            timeout = Timeout.start_new(timeout, Empty)
+            try:
+                self.getters.add(waiter)
+                if self.putters:
+                    self._schedule_unlock()
+                result = waiter.get()
+                assert result is waiter, 'Invalid switch into Queue.peek: %r' % (result, )
+                return self._peek()
+            finally:
+                self.getters.discard(waiter)
+                timeout.cancel()
+        else:
+            raise Empty
+
+    def peek_nowait(self):
+        return self.peek(False)
+
     def _unlock(self):
-        try:
-            while True:
-                if self.qsize() and self.getters:
-                    getter = self.getters.pop()
-                    if getter:
-                        try:
-                            item = self._get()
-                        except:
-                            getter.throw(*sys.exc_info())
-                        else:
-                            getter.switch(item)
-                elif self.putters and self.getters:
+        while True:
+            repeat = False
+            if self.putters and (self.maxsize is None or self.qsize() < self.maxsize):
+                repeat = True
+                try:
                     putter = self.putters.pop()
-                    if putter:
-                        getter = self.getters.pop()
-                        if getter:
-                            item = putter.item
-                            putter.item = _NONE  # this makes greenlet calling put() not to call _put() again
-                            self._put(item)
-                            item = self._get()
-                            getter.switch(item)
-                            putter.switch(putter)
-                        else:
-                            self.putters.add(putter)
-                elif self.putters and (self.getters or self.qsize() < self.maxsize):
-                    putter = self.putters.pop()
-                    putter.switch(putter)
+                    self._put(putter.item)
+                except:
+                    putter.throw(*sys.exc_info())
                 else:
-                    break
-        finally:
-            self._event_unlock = None  # QQQ maybe it's possible to obtain this info from libevent?
-            # i.e. whether this event is pending _OR_ currently executing
+                    putter.switch(putter)
+            if self.getters and self.qsize():
+                repeat = True
+                getter = self.getters.pop()
+                getter.switch(getter)
+            if not repeat:
+                return
         # testcase: 2 greenlets: while True: q.put(q.get()) - nothing else has a change to execute
         # to avoid this, schedule unlock with timer(0, ...) once in a while
+        # replace 'while True' with 'for _ in xrange(100): ...; self._timer.start(self._unlock)
+        # but then I need _timer and self._event_unlock to play with each other
 
     def _schedule_unlock(self):
-        if self._event_unlock is None:
-            self._event_unlock = core.active_event(self._unlock)
-            # QQQ re-activate event (with event_active libevent call) instead of creating a new one each time
+        self._event_unlock.start(self._unlock)
 
     def __iter__(self):
         return self
@@ -254,11 +279,18 @@ class Queue(object):
 
 
 class ItemWaiter(Waiter):
-    __slots__ = ['item']
+    __slots__ = ['item', 'queue']
 
-    def __init__(self, item):
+    def __init__(self, item, queue):
         Waiter.__init__(self)
         self.item = item
+        self.queue = queue
+
+    def put_and_switch(self):
+        self.queue._put(self.item)
+        self.queue = None
+        self.item = None
+        return self.switch(self)
 
 
 class PriorityQueue(Queue):
@@ -337,3 +369,119 @@ class JoinableQueue(Queue):
         unfinished tasks drops to zero, :meth:`join` unblocks.
         '''
         self._cond.wait()
+
+
+class Channel(object):
+
+    def __init__(self):
+        self.getters = collections.deque()
+        self.putters = collections.deque()
+        self.hub = get_hub()
+        self._event_unlock = self.hub.loop.callback()
+
+    def __repr__(self):
+        return '<%s at %s %s>' % (type(self).__name__, hex(id(self)), self._format())
+
+    def __str__(self):
+        return '<%s %s>' % (type(self).__name__, self._format())
+
+    def _format(self):
+        result = ''
+        if self.getters:
+            result += ' getters[%s]' % len(self.getters)
+        if self.putters:
+            result += ' putters[%s]' % len(self.putters)
+        return result
+
+    @property
+    def balance(self):
+        return len(self.putters) - len(self.getters)
+
+    def qsize(self):
+        return 0
+
+    def empty(self):
+        return True
+
+    def full(self):
+        return True
+
+    def put(self, item, block=True, timeout=None):
+        if self.hub is getcurrent():
+            if self.getters:
+                getter = self.getters.popleft()
+                getter.switch(item)
+                return
+            raise Full
+
+        if not block:
+            timeout = 0
+
+        waiter = Waiter()
+        item = (item, waiter)
+        self.putters.append(item)
+        timeout = Timeout.start_new(timeout, Full)
+        try:
+            if self.getters:
+                self._schedule_unlock()
+            result = waiter.get()
+            assert result is waiter, "Invalid switch into Channel.put: %r" % (result, )
+        except:
+            self._discard(item)
+            raise
+        finally:
+            timeout.cancel()
+
+    def _discard(self, item):
+        try:
+            self.putters.remove(item)
+        except ValueError:
+            pass
+
+    def put_nowait(self, item):
+        self.put(item, False)
+
+    def get(self, block=True, timeout=None):
+        if self.hub is getcurrent():
+            if self.putters:
+                item, putter = self.putters.popleft()
+                self.hub.loop.run_callback(putter.switch, putter)
+                return item
+
+        if not block:
+            timeout = 0
+
+        waiter = Waiter()
+        timeout = Timeout.start_new(timeout, Empty)
+        try:
+            self.getters.append(waiter)
+            if self.putters:
+                self._schedule_unlock()
+            return waiter.get()
+        except:
+            self.getters.remove(waiter)
+            raise
+        finally:
+            timeout.cancel()
+
+    def get_nowait(self):
+        return self.get(False)
+
+    def _unlock(self):
+        while self.putters and self.getters:
+            getter = self.getters.popleft()
+            item, putter = self.putters.popleft()
+            getter.switch(item)
+            putter.switch(putter)
+
+    def _schedule_unlock(self):
+        self._event_unlock.start(self._unlock)
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        result = self.get()
+        if result is StopIteration:
+            raise result
+        return result
