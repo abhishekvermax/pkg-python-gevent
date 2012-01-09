@@ -6,8 +6,8 @@ Author: Örjan Persson <orange@fobie.net>
 Last-Update: 2011-10-26
 Index: python-gevent/setup.py
 ===================================================================
---- python-gevent.orig/setup.py	2011-10-26 22:03:31.668392328 +0200
-+++ python-gevent/setup.py	2011-10-26 22:21:58.185879246 +0200
+--- python-gevent.orig/setup.py	2012-01-09 17:03:55.013931435 +0100
++++ python-gevent/setup.py	2012-01-09 17:04:34.333931430 +0100
 @@ -2,6 +2,7 @@
  """gevent build & installation script"""
  import sys
@@ -16,24 +16,20 @@ Index: python-gevent/setup.py
  import re
  import traceback
  from os.path import join, abspath, basename, dirname
-@@ -68,6 +69,10 @@
+@@ -68,6 +69,8 @@
                             ('EV_EMBED_ENABLE', '0'),
                             ('EV_CHILD_ENABLE', '0'),
                             ("EV_PERIODIC_ENABLE", '0')]
 +elif platform.os.name == 'posix':
-+    CORE.include_dirs = ['/usr/include']
-+    CORE.library_dirs = ['/usr/lib']
 +    CORE.libraries = CORE.libraries + ['ev']
  
  
  def need_configure_ares():
-@@ -121,6 +126,11 @@
+@@ -121,6 +124,9 @@
          if sys.platform != 'darwin':
              ARES.libraries += ['rt']
      ARES.define_macros += [('CARES_EMBED', '')]
 +elif platform.os.name == 'posix':
-+    ARES.include_dirs = ['/usr/include']
-+    ARES.library_dirs = ['/usr/lib']
 +    ARES.libraries = ARES.libraries + ['cares']
 +    ARES.define_macros += [('HAVE_NETDB_H', '')]
  
