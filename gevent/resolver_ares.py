@@ -25,7 +25,7 @@ class Resolver(object):
         self.fork_watcher.start(self._on_fork)
 
     def __repr__(self):
-        return '<%s at 0x%x ares=%r>' % (self.__class__.__name__, id(self), self.ares)
+        return '<gevent.resolver_ares.Resolver at 0x%x ares=%r>' % (id(self), self.ares)
 
     def _on_fork(self):
         pid = os.getpid()
@@ -50,7 +50,10 @@ class Resolver(object):
             try:
                 waiter = Waiter(self.hub)
                 ares.gethostbyname(waiter, hostname, family)
-                return waiter.get()
+                result = waiter.get()
+                if not result[-1]:
+                    raise gaierror(-5, 'No address associated with hostname')
+                return result
             except gaierror:
                 if ares is self.ares:
                     raise
@@ -131,7 +134,7 @@ class Resolver(object):
         if len(values) == 2 and values[0] == values[1]:
             values.pop()
 
-        result  = []
+        result = []
         result4 = []
         result6 = []
 
@@ -154,7 +157,7 @@ class Resolver(object):
         result += result4 + result6
 
         if not result:
-            raise error('Internal error in %s' % ares.gethostbyname)
+            raise gaierror(-5, 'No address associated with hostname')
 
         return result
 
@@ -214,7 +217,10 @@ class Resolver(object):
             address = address[:2] + sockaddr[2:]
 
         self.ares.getnameinfo(waiter, address, flags)
-        return waiter.get()
+        node, service = waiter.get()
+        if service is None:
+            service = '0'
+        return node, service
 
     def getnameinfo(self, sockaddr, flags):
         while True:

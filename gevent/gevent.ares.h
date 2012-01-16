@@ -3,7 +3,7 @@
 
 struct PyGeventAresChannelObject;
 
-/* "gevent/ares.pyx":234
+/* "gevent/ares.pyx":236
  * 
  * 
  * cdef public class channel [object PyGeventAresChannelObject, type PyGeventAresChannel_Type]:             # <<<<<<<<<<<<<<

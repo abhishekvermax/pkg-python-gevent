@@ -1,11 +1,12 @@
 #ifdef _WIN32
-#ifdef EV_STANDALONE
+#ifdef LIBEV_EMBED
 /*
  * If libev on win32 is embedded, then we can use an
  * arbitrary mapping between integer fds and OS
  * handles. Then by defining special macros libev
  * will use our functions.
  */
+#define GEVENT_VFD_MODE
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

@@ -1,4 +1,4 @@
-/* Copyright (c) 2011 Denis Bilenko. See LICENSE for details. */
+/* Copyright (c) 2011-2012 Denis Bilenko. See LICENSE for details. */
 #ifdef Py_PYTHON_H
 
 static void gevent_handle_error(struct PyGeventLoopObject* loop, PyObject* context) {
@@ -58,7 +58,7 @@ static void gevent_stop(PyObject* watcher, struct PyGeventLoopObject* loop) {
     PyObject *result, *method;
     int error;
     error = 1;
-    method = PyObject_GetAttrString(watcher, "stop");  // XXX replace with GetAttr
+    method = PyObject_GetAttrString(watcher, "stop");
     if (method) {
         result = PyObject_Call(method, __pyx_empty_tuple, NULL);
         if (result) {
@@ -111,13 +111,15 @@ static void gevent_callback(struct PyGeventLoopObject* loop, PyObject* callback,
         gevent_handle_error(loop, watcher);
         if (revents & (EV_READ|EV_WRITE)) {
             /* this was an 'io' watcher: not stopping it will likely to cause the failing callback to be called repeatedly */
+            /* QQQ what about idle watcher? It will also cause the repeated failure. */
             gevent_stop(watcher, loop);
             goto end;
         }
     }
     if (!ev_is_active(c_watcher)) {
-        /* watcher will never be run again: calling stop() will clear 'callback' and 'args'
-         * also it will release the reference held by watcher to itself and does ref() if unref() was done before */
+        /* Watcher was stopped, maybe by libev. Let's call stop() to clean up
+         * 'callback' and 'args' properties, do Py_DECREF() and ev_ref() if necessary.
+         * BTW, we don't need to check for EV_ERROR, because libev stops the watcher in that case. */
         gevent_stop(watcher, loop);
     }
 end:

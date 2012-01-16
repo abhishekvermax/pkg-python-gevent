@@ -29,6 +29,24 @@ class Test(TestCase):
     def test_events_conversion(self):
         self.assertEqual(core._events_to_str(core.READ|core.WRITE), 'READ|WRITE')
 
+    def test_EVENTS(self):
+        self.assertEqual(str(core.EVENTS), 'gevent.core.EVENTS')
+        self.assertEqual(repr(core.EVENTS), 'gevent.core.EVENTS')
+
+    def test_io(self):
+        if sys.platform == 'win32':
+            Error = IOError
+        else:
+            Error = ValueError
+        self.assertRaises(Error, core.loop().io, -1, 1)
+        self.assertRaises(ValueError, core.loop().io, 1, core.TIMER)
+
+    def test_timer(self):
+        self.assertRaises(ValueError, core.loop().timer, 1, -1)
+
+    def test_signal(self):
+        self.assertRaises(ValueError, core.loop().signal, 1000)
+
 
 if __name__ == '__main__':
     main()
