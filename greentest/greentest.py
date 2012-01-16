@@ -75,7 +75,10 @@ def wrap_refcount(method):
                     sys.modules['urlparse'].clear_cache()
                 d = gettotalrefcount() - d
                 deltas.append(d)
-                if deltas[-1] == 0:
+                if len(deltas) >= 2 and deltas[-1] <= 0 and deltas[-2] <= 0:
+                    break
+                elif len(deltas) >= 3 and deltas[-3:] == [-1, 1, -1]:
+                    # as seen on test__server.py: test_assertion_in_blocking_func (__main__.TestNoneSpawn)
                     break
             else:
                 raise AssertionError('refcount increased by %r' % (deltas, ))
@@ -176,18 +179,25 @@ class TestCase(BaseTestCase):
     def tearDown(self):
         if hasattr(self, 'cleanup'):
             self.cleanup()
+        if self.switch_count is not None:
+            msg = None
+            if self.switch_count < 0:
+                raise AssertionError('hub.switch_count decreased???')
+            if self.switch_expected is None:
+                pass
+            elif self.switch_expected is True:
+                if self.switch_count <= 0:
+                    raise AssertionError('%s did not switch' % self.testcasename)
+            elif self.switch_expected is False:
+                if self.switch_count:
+                    raise AssertionError('%s switched but not expected to' % self.testcasename)
+            else:
+                raise AssertionError('Invalid value for switch_expected: %r' % (self.switch_expected, ))
+
+    @property
+    def switch_count(self):
         if self._switch_count is not None and hasattr(self._hub, 'switch_count'):
-            msg = ''
-            if self._hub.switch_count < self._switch_count:
-                msg = 'hub.switch_count decreased?\n'
-            elif self._hub.switch_count == self._switch_count:
-                if self.switch_expected:
-                    msg = '%s.%s did not switch\n' % (type(self).__name__, self.testname)
-            elif self._hub.switch_count > self._switch_count:
-                if not self.switch_expected:
-                    msg = '%s.%s switched but expected not to\n' % (type(self).__name__, self.testname)
-            if msg:
-                sys.stderr.write('WARNING: %s\n' % msg)
+            return self._hub.switch_count - self._switch_count
 
     @property
     def testname(self):
@@ -225,10 +235,7 @@ class TestCase(BaseTestCase):
     def _store_error(self, where, type, value, tb):
         del tb
         if self._error != self._none:
-            if self._hub is gevent.getcurrent():
-                self._hub.parent.throw(type, value)
-            else:
-                self._hub.loop.run_callback(self._hub.parent.throw, type, value)
+            self._hub.parent.throw(type, value)
         else:
             self._error = (where, type, value)
 
@@ -367,7 +374,7 @@ def walk_modules(basedir=None, modpath=None, include_so=False):
                 for p, m in walk_modules(path, modpath + fn + "."):
                     yield p, m
             continue
-        if fn.endswith('.py') and fn not in ['__init__.py', 'core.py']:
+        if fn.endswith('.py') and fn not in ['__init__.py', 'core.py', 'ares.py']:
             yield path, modpath + fn[:-3]
         elif include_so and fn.endswith('.so'):
             if fn.endswith('_d.so'):

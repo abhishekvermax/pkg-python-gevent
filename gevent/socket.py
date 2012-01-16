@@ -1,6 +1,6 @@
 # Copyright (c) 2005-2006, Bob Ippolito
 # Copyright (c) 2007, Linden Research, Inc.
-# Copyright (c) 2009-2011 Denis Bilenko
+# Copyright (c) 2009-2012 Denis Bilenko
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -188,46 +188,19 @@ def wait_readwrite(fileno, timeout=None, timeout_exc=timeout('timed out'), event
 cancel_wait_ex = error(EBADF, 'File descriptor was closed in another greenlet')
 
 
-def _cancel_wait(watcher):
-    if watcher.active:
-        switch = watcher.callback
-        if switch is not None:
-            greenlet = getattr(switch, '__self__', None)
-            if greenlet is not None:
-                greenlet.throw(cancel_wait_ex)
-
-
-def cancel_wait(event):
-    get_hub().loop.run_callback(_cancel_wait, event)
-
-
-if sys.version_info[:2] <= (2, 4):
-    # implement close argument to _fileobject that we require
-
-    realfileobject = _fileobject
-
-    class _fileobject(realfileobject):
-
-        __slots__ = realfileobject.__slots__ + ['_close']
-
-        def __init__(self, *args, **kwargs):
-            self._close = kwargs.pop('close', False)
-            realfileobject.__init__(self, *args, **kwargs)
-
-        def close(self):
-            try:
-                if self._sock:
-                    self.flush()
-            finally:
-                if self._close:
-                    self._sock.close()
-                self._sock = None
+def cancel_wait(watcher):
+    get_hub().cancel_wait(watcher, cancel_wait_ex)
 
 
 if sys.version_info[:2] < (2, 7):
     _get_memory = buffer
+elif sys.version_info[:2] < (3, 0):
+    def _get_memory(string, offset):
+        try:
+            return memoryview(string)[offset:]
+        except TypeError:
+            return buffer(string, offset)
 else:
-
     def _get_memory(string, offset):
         return memoryview(string)[offset:]
 
@@ -235,7 +208,7 @@ else:
 class _closedsocket(object):
     __slots__ = []
 
-    def _dummy(*args):
+    def _dummy(*args, **kwargs):
         raise error(EBADF, 'Bad file descriptor')
     # All _delegate_methods must also be initialized here.
     send = recv = recv_into = sendto = recvfrom = recvfrom_into = _dummy
@@ -332,7 +305,8 @@ class socket(object):
             self._wait(self._read_event)
         return socket(_sock=client_socket), address
 
-    def close(self,_closedsocket=_closedsocket, _delegate_methods=_delegate_methods, setattr=setattr):
+    def close(self, _closedsocket=_closedsocket, _delegate_methods=_delegate_methods,
+              setattr=setattr, cancel_wait_ex=cancel_wait_ex):
         # This function should not reference any globals. See Python issue #808164.
         self.hub.cancel_wait(self._read_event, cancel_wait_ex)
         self.hub.cancel_wait(self._write_event, cancel_wait_ex)
@@ -545,7 +519,7 @@ class socket(object):
     def shutdown(self, how):
         if how == 0:  # SHUT_RD
             self.hub.cancel_wait(self._read_event, cancel_wait_ex)
-        elif how == 1:  # SHUT_RW
+        elif how == 1:  # SHUT_WR
             self.hub.cancel_wait(self._write_event, cancel_wait_ex)
         else:
             self.hub.cancel_wait(self._read_event, cancel_wait_ex)

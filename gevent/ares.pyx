@@ -1,8 +1,7 @@
-# Copyright (c) 2011 Denis Bilenko. See LICENSE for details.
+# Copyright (c) 2011-2012 Denis Bilenko. See LICENSE for details.
 cimport cares
 import sys
 from python cimport *
-from gevent.core import EVENTS
 from gevent.core import io, loop
 from _socket import gaierror
 
@@ -181,10 +180,13 @@ cdef class result:
 
 class ares_host_result(tuple):
 
-    def __new__(cls, family, *args):
-        cdef object self = tuple.__new__(cls, *args)
+    def __new__(cls, family, iterable):
+        cdef object self = tuple.__new__(cls, iterable)
         self.family = family
         return self
+
+    def __getnewargs__(self):
+        return (self.family, tuple(self))
 
 
 cdef void gevent_ares_host_callback(void *arg, int status, int timeouts, hostent* host):
@@ -363,7 +365,7 @@ cdef public class channel [object PyGeventAresChannelObject, type PyGeventAresCh
             if not self._watchers:
                 self._timer.stop()
             return
-        watcher.start(self._process_fd, EVENTS, watcher)
+        watcher.start(self._process_fd, watcher, pass_events=True)
         self._timer.again(self._on_timer)
 
     def _on_timer(self):

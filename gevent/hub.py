@@ -35,6 +35,15 @@ except ImportError:
 getcurrent = greenlet.getcurrent
 GreenletExit = greenlet.GreenletExit
 
+
+# In greenlet >= 0.3.2, GreenletExit is a subclass of BaseException
+# In greenlet <= 0.3.1, GreenletExit is a subclass of Exception
+# Since, GreenletExit is a part of gevent's public interface, we want
+# it to be consistent, so if we got older greenlet, we monkey patch
+# GreenletExit's __bases__
+if GreenletExit.__bases__[0] is Exception:
+    GreenletExit.__bases__ = (BaseException, )
+
 if sys.version_info[0] <= 2:
     thread = __import__('thread')
 else:
@@ -151,7 +160,8 @@ if _original_fork is not None:
 
     def fork():
         result = _original_fork()
-        get_hub().loop.reinit()
+        if not result:
+            get_hub().loop.reinit()
         return result
 
 
@@ -221,13 +231,32 @@ def _import(path):
         raise error
     if not isinstance(path, basestring):
         return path
+    if '.' not in path:
+        raise ImportError("Cannot import %r (required format: module.class)" % path)
     module, item = path.rsplit('.', 1)
     x = __import__(module)
     for attr in path.split('.')[1:]:
         x = getattr(x, attr, _NONE)
         if x is _NONE:
-            raise ImportError('cannot import name %r from %r' % (attr, x))
+            raise ImportError('Cannot import name %r from %r' % (attr, x))
     return x
+
+
+def config(default, envvar):
+    result = os.environ.get(envvar) or default
+    if isinstance(result, basestring):
+        return result.split(',')
+    return result
+
+
+def resolver_config(default, envvar):
+    result = config(default, envvar)
+    return [_resolvers.get(x, x) for x in result]
+
+
+_resolvers = {'ares': 'gevent.resolver_ares.Resolver',
+              'thread': 'gevent.resolver_thread.Resolver',
+              'block': 'gevent.socket.BlockingResolver'}
 
 
 class Hub(greenlet):
@@ -238,10 +267,15 @@ class Hub(greenlet):
 
     SYSTEM_ERROR = (KeyboardInterrupt, SystemExit, SystemError)
     NOT_ERROR = (GreenletExit, SystemExit)
-    loop_class = 'gevent.core.loop'
+    loop_class = config('gevent.core.loop', 'GEVENT_LOOP')
     resolver_class = ['gevent.resolver_ares.Resolver',
+                      'gevent.resolver_thread.Resolver',
                       'gevent.socket.BlockingResolver']
+    resolver_class = resolver_config(resolver_class, 'GEVENT_RESOLVER')
+    threadpool_class = config('gevent.threadpool.ThreadPool', 'GEVENT_THREADPOOL')
+    DEFAULT_BACKEND = config(None, 'GEVENT_BACKEND')
     format_context = 'pprint.pformat'
+    threadpool_size = 10
 
     def __init__(self, loop=None, default=None):
         greenlet.__init__(self)
@@ -253,17 +287,20 @@ class Hub(greenlet):
             if default is None:
                 default = get_ident() == MAIN_THREAD
             loop_class = _import(self.loop_class)
+            if loop is None:
+                loop = self.DEFAULT_BACKEND
             self.loop = loop_class(flags=loop, default=default)
         self._resolver = None
+        self._threadpool = None
         self.format_context = _import(self.format_context)
 
     def __repr__(self):
-        args = (self.__class__.__name__, id(self), self.loop)
+        result = '<%s at 0x%x %s' % (self.__class__.__name__, id(self), self.loop._format())
         if self._resolver is not None:
-            args = args + (self._resolver, )
-            return '<%s at 0x%x loop=%r resolver=%r>' % args
-        else:
-            return '<%s at 0x%x loop=%r>' % args
+            result += ' resolver=%r' % self._resolver
+        if self._threadpool is not None:
+            result += ' threadpool=%r' % self._threadpool
+        return result + '>'
 
     def handle_error(self, context, type, value, tb):
         self.print_exception(context, type, value, tb)
@@ -349,7 +386,7 @@ class Hub(greenlet):
         If *event* was provided, exit when it was signalled with :meth:`Event.set` method.
 
         Returns True if exited because the loop finished execution.
-        Returns None if exited because of timeout expired or event was signalled.
+        Returns False if exited because of timeout expired or event was signalled.
         """
         assert getcurrent() is self.parent, "only possible from the MAIN greenlet"
         if self.dead:
@@ -363,7 +400,6 @@ class Hub(greenlet):
 
         try:
             if timeout is not None:
-                self.loop.update()
                 timeout = self.loop.timer(timeout, ref=False)
                 timeout.start(waiter.switch)
 
@@ -378,6 +414,21 @@ class Hub(greenlet):
         finally:
             if event is not None:
                 event.unlink(switch)
+        return False
+
+    def destroy(self):
+        # this function would be useful after fork / before exec
+        global _threadlocal
+        if self._resolver is not None:
+            self._resolver.close()
+            del self._resolver
+        if self._threadpool is not None:
+            self._threadpool.close()
+            del self._threadpool
+        self.loop.destroy()
+        del self.loop
+        if getattr(_threadlocal, 'hub', None) is self:
+            del _threadlocal.hub
 
     def _get_resolver(self):
         if self._resolver is None:
@@ -393,6 +444,21 @@ class Hub(greenlet):
         del self._resolver
 
     resolver = property(_get_resolver, _set_resolver, _del_resolver)
+
+    def _get_threadpool(self):
+        if self._threadpool is None:
+            if self.threadpool_class is not None:
+                self.threadpool_class = _import(self.threadpool_class)
+                self._threadpool = self.threadpool_class(self.threadpool_size, hub=self)
+        return self._threadpool
+
+    def _set_threadpool(self, value):
+        self._threadpool = value
+
+    def _del_threadpool(self):
+        del self._threadpool
+
+    threadpool = property(_get_threadpool, _set_threadpool, _del_threadpool)
 
 
 class LoopExit(Exception):

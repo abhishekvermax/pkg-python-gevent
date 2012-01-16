@@ -1,6 +1,6 @@
 from time import time
 import gevent
-from gevent import pool
+from gevent import pool, six
 from gevent.event import Event
 import greentest
 import random
@@ -48,7 +48,7 @@ class TestCoroutinePool(greentest.TestCase):
         done = pool.spawn(consumer)
         pool.apply_async(producer)
         done.get()
-        self.assertEquals(['cons1', 'prod', 'cons2'], results)
+        self.assertEqual(['cons1', 'prod', 'cons2'], results)
 
     def dont_test_timer_cancel(self):
         timer_fired = []
@@ -62,24 +62,14 @@ class TestCoroutinePool(greentest.TestCase):
         pool = self.klass(2)
         pool.apply(some_work)
         gevent.sleep(0)
-        self.assertEquals(timer_fired, [])
+        self.assertEqual(timer_fired, [])
 
     def test_reentrant(self):
         pool = self.klass(1)
-
-        def reenter():
-            result = pool.apply(lambda a: a, ('reenter', ))
-            self.assertEqual('reenter', result)
-
-        pool.apply(reenter)
-
+        result = pool.apply(pool.apply, (lambda a: a+1, (5, )))
+        self.assertEqual(result, 6)
         evt = Event()
-
-        def reenter_async():
-            pool.apply_async(lambda a: a, ('reenter', ))
-            evt.set()
-
-        pool.apply_async(reenter_async)
+        pool.apply_async(evt.set)
         evt.wait()
 
     def test_stderr_raising(self):
@@ -153,14 +143,14 @@ class PoolBasicTests(greentest.TestCase):
         gevent.sleep(0.01)
         self.assertEqual(sorted(r), [1, 2, 3, 4])
 
-    def test_execute(self):
+    def test_apply(self):
         p = self.klass()
         result = p.apply(lambda a: ('foo', a), (1, ))
         self.assertEqual(result, ('foo', 1))
 
-    def test_init_zerosize(self):
+    def test_init_error(self):
         self.switch_expected = False
-        self.assertRaises(ValueError, self.klass, 0)
+        self.assertRaises(ValueError, self.klass, -1)
 
 #
 # tests from standard library test/test_multiprocessing.py
@@ -211,8 +201,8 @@ class TestPool(greentest.TestCase):
 
     def test_map(self):
         pmap = self.pool.map
-        self.assertEqual(pmap(sqr, range(10)), map(sqr, range(10)))
-        self.assertEqual(pmap(sqr, range(100)), map(sqr, range(100)))
+        self.assertEqual(pmap(sqr, range(10)), list(map(sqr, range(10))))
+        self.assertEqual(pmap(sqr, range(100)), list(map(sqr, range(100))))
 
     def test_async(self):
         res = self.pool.apply_async(sqr, (7, TIMEOUT1,))
@@ -238,32 +228,32 @@ class TestPool(greentest.TestCase):
 
     def test_imap(self):
         it = self.pool.imap(sqr, range(10))
-        self.assertEqual(list(it), map(sqr, range(10)))
+        self.assertEqual(list(it), list(map(sqr, range(10))))
 
         it = self.pool.imap(sqr, range(10))
         for i in range(10):
-            self.assertEqual(it.next(), i * i)
-        self.assertRaises(StopIteration, it.next)
+            self.assertEqual(six.advance_iterator(it), i * i)
+        self.assertRaises(StopIteration, lambda: six.advance_iterator(it))
 
         it = self.pool.imap(sqr, range(1000))
         for i in range(1000):
-            self.assertEqual(it.next(), i * i)
-        self.assertRaises(StopIteration, it.next)
+            self.assertEqual(six.advance_iterator(it), i * i)
+        self.assertRaises(StopIteration, lambda: six.advance_iterator(it))
 
     def test_imap_random(self):
         it = self.pool.imap(sqr_random_sleep, range(10))
-        self.assertEqual(list(it), map(sqr, range(10)))
+        self.assertEqual(list(it), list(map(sqr, range(10))))
 
     def test_imap_unordered(self):
         it = self.pool.imap_unordered(sqr, range(1000))
-        self.assertEqual(sorted(it), map(sqr, range(1000)))
+        self.assertEqual(sorted(it), list(map(sqr, range(1000))))
 
         it = self.pool.imap_unordered(sqr, range(1000))
-        self.assertEqual(sorted(it), map(sqr, range(1000)))
+        self.assertEqual(sorted(it), list(map(sqr, range(1000))))
 
     def test_imap_unordered_random(self):
         it = self.pool.imap_unordered(sqr_random_sleep, range(10))
-        self.assertEqual(sorted(it), map(sqr, range(10)))
+        self.assertEqual(sorted(it), list(map(sqr, range(10))))
 
     def test_terminate(self):
         result = self.pool.map_async(gevent.sleep, [0.1] * ((self.size or 10) * 2))
@@ -347,19 +337,26 @@ class TestSpawn(greentest.TestCase):
         self.assertEqual(len(p), 0)
 
 
+def error_iter():
+    yield 1
+    yield 2
+    raise ExpectedException
+
+
 class TestErrorInIterator(greentest.TestCase):
     error_fatal = False
 
     def test(self):
         p = pool.Pool(3)
-        def iter():
-            yield 1
-            yield 2
-            raise ExpectedException
-        self.assertRaises(ExpectedException, p.map, lambda x: None, iter())
-        def unordered(*args):
-            return list(p.imap_unordered(*args))
-        self.assertRaises(ExpectedException, unordered, lambda x: None, iter())
+        self.assertRaises(ExpectedException, p.map, lambda x: None, error_iter())
+        gevent.sleep(0.001)
+
+    def test_unordered(self):
+        p = pool.Pool(3)
+        def unordered():
+            return list(p.imap_unordered(lambda x: None, error_iter()))
+        self.assertRaises(ExpectedException, unordered)
+        gevent.sleep(0.001)
 
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
-# Copyright (c) 2009-2011 Denis Bilenko. See LICENSE for details.
+# Copyright (c) 2009-2012 Denis Bilenko. See LICENSE for details.
 """Make the standard library cooperative.
 
 The functions in this module patch parts of the standard library with compatible cooperative counterparts
@@ -67,6 +67,22 @@ __all__ = ['patch_all',
            'patch_thread']
 
 
+def get_unpatched(name, items):
+    # QQQ would prefer to avoid importing gevent.xxx module just to get __target__
+    # XXX does not work for 'time', 'sleep'
+    source = getattr(__import__('gevent.' + name), name)
+    target = getattr(source, '__target__', name)
+    dest = __import__(target)
+    original = getattr(dest, 'monkey_original', dest)
+    if isinstance(items, basestring):
+        return getattr(original, items)
+    else:
+        results = []
+        for item in items:
+            results.append(getattr(original, item))
+        return results
+
+
 class original(object):
     pass
 
@@ -124,6 +140,8 @@ def patch_thread(threading=True, _threading_local=True):
         threading._allocate_lock = green_thread.allocate_lock
         threading.Lock = green_thread.allocate_lock
         threading._get_ident = green_thread.get_ident
+        from gevent.hub import sleep
+        threading._sleep = sleep
     if _threading_local:
         _threading_local = __import__('_threading_local')
         _threading_local.local = local
@@ -167,19 +185,13 @@ def patch_select(aggressive=False):
     patch_module('select')
     if aggressive:
         select = __import__('select')
-        # since these are blocking and don't work with the libevent's event loop
-        # we're removing them here. This makes some other modules (e.g. asyncore)
-        # non-blocking, as they use select that we provide when none of these are available.
+        # since these are blocking we're removing them here. This makes some other
+        # modules (e.g. asyncore)  non-blocking, as they use select that we provide
+        # when none of these are available.
         select.__dict__.pop('poll', None)
         select.__dict__.pop('epoll', None)
         select.__dict__.pop('kqueue', None)
         select.__dict__.pop('kevent', None)
-
-
-def patch_httplib():
-    from gevent.httplib import HTTPConnection
-    httplib = __import__('httplib')
-    httplib.HTTPConnection = HTTPConnection
 
 
 def patch_all(socket=True, dns=True, time=True, select=True, thread=True, os=True, ssl=True, httplib=False, aggressive=True):
@@ -199,9 +211,11 @@ def patch_all(socket=True, dns=True, time=True, select=True, thread=True, os=Tru
         try:
             patch_ssl()
         except ImportError:
-            pass  # python <= 2.5 and ssl package is not installed
+            if sys.version_info[:2] > (2, 5):
+                raise
+            # in Python 2.5, 'ssl' is a standalone package not included in stdlib
     if httplib:
-        patch_httplib()
+        raise ValueError('gevent.httplib is no longer provided, httplib must be False')
 
 
 if __name__ == '__main__':

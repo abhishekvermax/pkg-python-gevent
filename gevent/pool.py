@@ -17,6 +17,7 @@ from gevent.greenlet import joinall, Greenlet
 from gevent.timeout import Timeout
 from gevent.event import Event
 from gevent.coros import Semaphore, DummySemaphore
+from gevent import six
 
 __all__ = ['Group', 'Pool']
 
@@ -75,21 +76,6 @@ class Group(object):
         add = self.add
         greenlet = self.greenlet_class.spawn(*args, **kwargs)
         add(greenlet)
-        return greenlet
-
-    def spawn_link(self, *args, **kwargs):
-        greenlet = self.spawn(*args, **kwargs)
-        greenlet.link()
-        return greenlet
-
-    def spawn_link_value(self, *args, **kwargs):
-        greenlet = self.spawn(*args, **kwargs)
-        greenlet.link_value()
-        return greenlet
-
-    def spawn_link_exception(self, *args, **kwargs):
-        greenlet = self.spawn(*args, **kwargs)
-        greenlet.link_exception()
         return greenlet
 
 #     def close(self):
@@ -228,6 +214,10 @@ class IMapUnordered(Greenlet):
             raise value.exc
         return value
 
+    if six.PY3:
+        __next__ = next
+        del next
+
     def _run(self):
         try:
             func = self.func
@@ -285,6 +275,10 @@ class IMap(Greenlet):
             if value is not _SKIP:
                 return value
 
+    if six.PY3:
+        __next__ = next
+        del next
+
     def _run(self):
         try:
             func = self.func
@@ -325,8 +319,8 @@ class Failure(object):
 class Pool(Group):
 
     def __init__(self, size=None, greenlet_class=None):
-        if size is not None and size < 1:
-            raise ValueError('Invalid size for pool (positive integer or None required): %r' % (size, ))
+        if size is not None and size < 0:
+            raise ValueError('size must not be negative: %r' % (size, ))
         Group.__init__(self)
         self.size = size
         if greenlet_class is not None:
@@ -360,36 +354,6 @@ class Pool(Group):
         self._semaphore.acquire()
         try:
             greenlet = self.greenlet_class.spawn(*args, **kwargs)
-            self.add(greenlet)
-        except:
-            self._semaphore.release()
-            raise
-        return greenlet
-
-    def spawn_link(self, *args, **kwargs):
-        self._semaphore.acquire()
-        try:
-            greenlet = self.greenlet_class.spawn_link(*args, **kwargs)
-            self.add(greenlet)
-        except:
-            self._semaphore.release()
-            raise
-        return greenlet
-
-    def spawn_link_value(self, *args, **kwargs):
-        self._semaphore.acquire()
-        try:
-            greenlet = self.greenlet_class.spawn_link_value(*args, **kwargs)
-            self.add(greenlet)
-        except:
-            self._semaphore.release()
-            raise
-        return greenlet
-
-    def spawn_link_exception(self, *args, **kwargs):
-        self._semaphore.acquire()
-        try:
-            greenlet = self.greenlet_class.spawn_link_exception(*args, **kwargs)
             self.add(greenlet)
         except:
             self._semaphore.release()

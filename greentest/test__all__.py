@@ -69,7 +69,7 @@ class Test(unittest.TestCase):
             item = getattr(self.module, name)
             try:
                 stdlib_item = getattr(self.stdlib_module, name)
-                assert item is not stdlib_item, (item, stdlib_item)
+                assert item is not stdlib_item, (name, item, stdlib_item)
             except AttributeError:
                 if name not in COULD_BE_MISSING.get(self.stdlib_name, []):
                     raise
@@ -127,6 +127,9 @@ are missing from %r:
         self.modname = modname
         exec "import %s" % modname in {}
         self.module = sys.modules[modname]
+
+        if modname == 'gevent.six':
+            return
 
         self.check_all()
 

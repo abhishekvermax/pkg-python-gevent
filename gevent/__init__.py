@@ -1,16 +1,14 @@
-# Copyright (c) 2009-2011 Denis Bilenko. See LICENSE for details.
+# Copyright (c) 2009-2012 Denis Bilenko. See LICENSE for details.
 """
 gevent is a coroutine-based Python networking library that uses greenlet
-to provide a high-level synchronous API on top of libevent event loop.
+to provide a high-level synchronous API on top of libev event loop.
 
 See http://www.gevent.org/ for the documentation.
 """
 
-version_info = (1, 0, 0, 'alpha', 3)
-__version__ = '1.0a3'
-__changeset__ = '2104:28284d2bf12b'
-# 'dev' in version_info should be replaced with alpha|beta|candidate|final
-# 'dev' in __version__ should be replaced with a|b|rc|<empty string>
+version_info = (1, 0, 0, 'beta', 1)
+__version__ = '1.0b1'
+__changeset__ = '2290:745149cd866d'
 
 
 __all__ = ['get_hub',
@@ -49,7 +47,6 @@ try:
     from gevent.hub import fork
 except ImportError:
     __all__.remove('fork')
-
 
 
 def reinit():

@@ -61,9 +61,13 @@ class Input(object):
     def _send_100_continue(self):
         if self.socket is not None:
             self.socket.sendall(_CONTINUE_RESPONSE)
-            self.sendall = None
+            self.socket = None
 
-    def _do_read(self, reader, length=None):
+    def _do_read(self, length=None, use_readline=False):
+        if use_readline:
+            reader = self.rfile.readline
+        else:
+            reader = self.rfile.read
         content_length = self.content_length
         if content_length is None:
             # Either Content-Length or "Transfer-Encoding: chunked" must be present in a request with a body
@@ -79,9 +83,14 @@ class Input(object):
             return ''
         read = reader(length)
         self.position += len(read)
+        if len(read) < length:
+            if (use_readline and not read.endswith("\n")) or not use_readline:
+                raise IOError("unexpected end of file while reading request at position %s" % (self.position,))
+
         return read
 
-    def _chunked_read(self, rfile, length=None, use_readline=False):
+    def _chunked_read(self, length=None, use_readline=False):
+        rfile = self.rfile
         self._send_100_continue()
 
         if length == 0:
@@ -121,7 +130,11 @@ class Input(object):
                 if use_readline and data[-1] == "\n":
                     break
             else:
-                self.chunk_length = int(rfile.readline().split(";", 1)[0], 16)
+                line = rfile.readline()
+                if not line.endswith("\n"):
+                    self.chunk_length = 0
+                    raise IOError("unexpected end of file while reading chunked data header")
+                self.chunk_length = int(line.split(";", 1)[0], 16)
                 self.position = 0
                 if self.chunk_length == 0:
                     rfile.readline()
@@ -130,14 +143,14 @@ class Input(object):
 
     def read(self, length=None):
         if self.chunked_input:
-            return self._chunked_read(self.rfile, length)
-        return self._do_read(self.rfile.read, length)
+            return self._chunked_read(length)
+        return self._do_read(length)
 
     def readline(self, size=None):
         if self.chunked_input:
-            return self._chunked_read(self.rfile, size, True)
+            return self._chunked_read(size, True)
         else:
-            return self._do_read(self.rfile.readline, size)
+            return self._do_read(size, use_readline=True)
 
     def readlines(self, hint=None):
         return list(self)
@@ -165,14 +178,6 @@ class WSGIHandler(object):
         else:
             self.rfile = rfile
 
-    @property
-    def wfile(self):
-        # DEPRECATED, UNTESTED, TO BE REMOVED
-        wfile = getattr(self, '_wfile', None)
-        if wfile is None:
-            wfile = self._wfile = self.socket.makefile('wb', 0)
-        return wfile
-
     def handle(self):
         try:
             while self.socket is not None:
@@ -198,7 +203,6 @@ class WSGIHandler(object):
                     pass
             self.__dict__.pop('socket', None)
             self.__dict__.pop('rfile', None)
-            self.__dict__.pop('_wfile', None)  # XXX remove once wfile property is gone
 
     def _check_http_version(self):
         version = self.request_version
@@ -560,8 +564,8 @@ class WSGIServer(StreamServer):
     def get_environ(self):
         return self.environ.copy()
 
-    def pre_start(self):
-        StreamServer.pre_start(self)
+    def init_socket(self):
+        StreamServer.init_socket(self)
         self.update_environ()
 
     def update_environ(self):

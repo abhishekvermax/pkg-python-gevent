@@ -3,6 +3,7 @@
 import sys
 import os
 import re
+import shutil
 import traceback
 from os.path import join, abspath, basename, dirname
 from glob import glob
@@ -12,6 +13,7 @@ try:
 except ImportError:
     from distutils.core import Extension, setup
 from distutils.command.build_ext import build_ext
+from distutils.command.sdist import sdist as _sdist
 from distutils.errors import CCompilerError, DistutilsExecError, DistutilsPlatformError
 ext_errors = (CCompilerError, DistutilsExecError, DistutilsPlatformError, IOError)
 
@@ -19,11 +21,12 @@ ext_errors = (CCompilerError, DistutilsExecError, DistutilsPlatformError, IOErro
 __version__ = re.search("__version__\s*=\s*'(.*)'", open('gevent/__init__.py').read(), re.M).group(1)
 assert __version__
 
+libev_embed = os.path.exists('libev')
 ares_embed = os.path.exists('c-ares')
 define_macros = []
 libraries = []
-ares_configure_command = [abspath('c-ares/configure'),
-                          'CONFIG_COMMANDS=', 'CONFIG_FILES=']
+libev_configure_command = ["/bin/sh", abspath('libev/configure'), '> configure-output.txt']
+ares_configure_command = ["/bin/sh", abspath('c-ares/configure'), 'CONFIG_COMMANDS= CONFIG_FILES= > configure-output.txt']
 
 
 if sys.platform == 'win32':
@@ -58,29 +61,6 @@ ARES.optional = True
 ext_modules = [CORE, ARES]
 
 
-if os.path.exists('libev'):
-    CORE.define_macros += [('EV_STANDALONE', '1'),
-                           ('EV_COMMON', ''),  # we don't use void* data
-                           # libev watchers that we don't use currently:
-                           ('EV_STAT_ENABLE', '0'),
-                           ('EV_CHECK_ENABLE', '0'),
-                           ('EV_CLEANUP_ENABLE', '0'),
-                           ('EV_EMBED_ENABLE', '0'),
-                           ('EV_CHILD_ENABLE', '0'),
-                           ("EV_PERIODIC_ENABLE", '0')]
-
-
-def need_configure_ares():
-    if sys.platform == 'win32':
-        return False
-    if not os.path.exists('c-ares/ares_config.h'):
-        return True
-    if not os.path.exists('c-ares/ares_build.h'):
-        return True
-    if 'Generated from ares_build.h.in by configure' not in read('c-ares/ares_build.h', 100):
-        return True
-
-
 def make_universal_header(filename, *defines):
     defines = [('#define %s ' % define, define) for define in defines]
     lines = open(filename, 'r').read().split('\n')
@@ -100,35 +80,117 @@ def make_universal_header(filename, *defines):
     f.close()
 
 
-def configure_ares():
-    if need_configure_ares():
-        # restore permissions
-        os.chmod(ares_configure_command[0], 493)  # 493 == 0755
-        rc = os.system('cd c-ares && %s' % ' '.join(ares_configure_command))
+def _system(cmd):
+    cmd = ' '.join(cmd)
+    sys.stderr.write('Running %r in %s\n' % (cmd, os.getcwd()))
+    return os.system(cmd)
+
+
+def configure_libev(bext, ext):
+    if sys.platform == "win32":
+        CORE.define_macros.append(('EV_STANDALONE', '1'))
+        return
+
+    bdir = os.path.join(bext.build_temp, 'libev')
+    ext.include_dirs.insert(0, bdir)
+
+    if not os.path.isdir(bdir):
+        os.makedirs(bdir)
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(bdir)
+        if os.path.exists('config.h'):
+            return
+
+        rc = _system(libev_configure_command)
         if rc == 0 and sys.platform == 'darwin':
-            make_universal_header('c-ares/ares_build.h', 'CARES_SIZEOF_LONG')
-            make_universal_header('c-ares/ares_config.h', 'SIZEOF_LONG', 'SIZEOF_SIZE_T', 'SIZEOF_TIME_T')
+            make_universal_header('config.h', 'SIZEOF_LONG', 'SIZEOF_SIZE_T', 'SIZEOF_TIME_T')
+    finally:
+        os.chdir(cwd)
+
+
+def configure_ares(bext, ext):
+    bdir = os.path.join(bext.build_temp, 'c-ares')
+    ext.include_dirs.insert(0, bdir)
+
+    if not os.path.isdir(bdir):
+        os.makedirs(bdir)
+
+    if sys.platform == "win32":
+        shutil.copy("c-ares\\ares_build.h.dist", os.path.join(bdir, "ares_build.h"))
+        return
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(bdir)
+        if os.path.exists('ares_config.h') and os.path.exists('ares_build.h'):
+            return
+
+        rc = _system(ares_configure_command)
+        if rc == 0 and sys.platform == 'darwin':
+            make_universal_header('ares_build.h', 'CARES_SIZEOF_LONG')
+            make_universal_header('ares_config.h', 'SIZEOF_LONG', 'SIZEOF_SIZE_T', 'SIZEOF_TIME_T')
+    finally:
+        os.chdir(cwd)
+
+
+if libev_embed:
+    CORE.define_macros += [('LIBEV_EMBED', '1'),
+                           ('EV_COMMON', ''),  # we don't use void* data
+                           # libev watchers that we don't use currently:
+                           ('EV_STAT_ENABLE', '0'),
+                           ('EV_CHECK_ENABLE', '0'),
+                           ('EV_CLEANUP_ENABLE', '0'),
+                           ('EV_EMBED_ENABLE', '0'),
+                           ('EV_CHILD_ENABLE', '0'),
+                           ("EV_PERIODIC_ENABLE", '0')]
+    CORE.configure = configure_libev
+    if sys.platform == "darwin":
+        os.environ["CFLAGS"] = ("%s %s" % (os.environ.get("CFLAGS", ""), "-U__llvm__")).lstrip()
+else:
+    CORE.libraries.append('ev')
 
 
 if ares_embed:
     ARES.sources += expand('c-ares/*.c')
+    ARES.configure = configure_ares
     if sys.platform == 'win32':
         ARES.libraries += ['advapi32']
         ARES.define_macros += [('CARES_STATICLIB', '')]
     else:
-        ARES.configure = configure_ares
         ARES.define_macros += [('HAVE_CONFIG_H', '')]
         if sys.platform != 'darwin':
             ARES.libraries += ['rt']
     ARES.define_macros += [('CARES_EMBED', '')]
+else:
+    ARES.libraries.append('cares')
+    ARES.define_macros += [('HAVE_NETDB_H', '')]
 
 
 def make(done=[]):
     if not done:
         if os.path.exists('Makefile'):
+            if "PYTHON" not in os.environ:
+                os.environ["PYTHON"] = sys.executable
             if os.system('make'):
                 sys.exit(1)
         done.append(1)
+
+
+class sdist(_sdist):
+
+    def run(self):
+        renamed = False
+        if os.path.exists('Makefile'):
+            make()
+            os.rename('Makefile', 'Makefile.ext')
+            renamed = True
+        try:
+            return _sdist.run(self)
+        finally:
+            if renamed:
+                os.rename('Makefile.ext', 'Makefile')
 
 
 class my_build_ext(build_ext):
@@ -137,7 +199,7 @@ class my_build_ext(build_ext):
         make()
         configure = getattr(ext, 'configure', None)
         if configure:
-            configure()
+            configure(self, ext)
 
     def build_extension(self, ext):
         self.gevent_prepare(ext)
@@ -169,7 +231,6 @@ class my_build_ext(build_ext):
                         os.symlink(path_to_build_core_so, path_to_core_so)
                     else:
                         sys.stderr.write('Copying %s to %s\n' % (path_to_build_core_so, path_to_core_so))
-                        import shutil
                         shutil.copyfile(path_to_build_core_so, path_to_core_so)
         except Exception:
             traceback.print_exc()
@@ -198,11 +259,10 @@ def run_setup(ext_modules):
         url='http://www.gevent.org/',
         packages=['gevent'],
         ext_modules=ext_modules,
-        cmdclass={'build_ext': my_build_ext},
+        cmdclass=dict(build_ext=my_build_ext, sdist=sdist),
         install_requires=['greenlet'],
         classifiers=[
         "License :: OSI Approved :: MIT License",
-        "Programming Language :: Python :: 2.4",
         "Programming Language :: Python :: 2.5",
         "Programming Language :: Python :: 2.6",
         "Programming Language :: Python :: 2.7",

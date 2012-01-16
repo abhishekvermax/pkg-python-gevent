@@ -29,7 +29,7 @@ class Test(greentest.TestCase):
 
         jobs = [gevent.spawn(connect) for _ in xrange(10)]
         gevent.joinall(jobs)
-        server.kill()
+        server.close()
         #self.assertEqual(conn.recv(1), '')
 
     def test_quit(self):
@@ -53,6 +53,30 @@ class Test(greentest.TestCase):
             conn.sendall('import sys; sys.exit(0)\r\n')
             line = conn.makefile().read()
             self.assertEqual(line, '')
+        finally:
+            server.stop()
+
+
+    def test_banner(self):
+        banner = "Welcome stranger!"
+        server = backdoor.BackdoorServer(('127.0.0.1', 0), banner=banner)
+        server.start()
+        try:
+            conn = socket.create_connection(('127.0.0.1', server.server_port))
+            response = read_until(conn, '>>> ')
+            self.assertEqual(response[:len(banner)], banner)
+        finally:
+            server.stop()
+
+    def test_builtins(self):
+        server = backdoor.BackdoorServer(('127.0.0.1', 0))
+        server.start()
+        try:
+            conn = socket.create_connection(('127.0.0.1', server.server_port))
+            read_until(conn, '>>> ')
+            conn.sendall('locals()["__builtins__"]\r\n')
+            response = read_until(conn, '>>> ')
+            self.assertTrue(len(response) < 300, msg="locals() unusable: %s..." % response[:100])
         finally:
             server.stop()
 

@@ -191,14 +191,12 @@ class TestDefaultSpawn(TestCase):
             self.server.start_accepting()
             self.report_netstat('after start_accepting')
             self.assertRequestSucceeded()
-        else:
-            self.assertRaises(Exception, self.server.start)  # XXX which exception exactly?
         self.stop_server()
         self.report_netstat('after stop')
 
     def test_backlog_is_not_accepted_for_socket(self):
         self.switch_expected = False
-        self.assertRaises(TypeError, self.ServerClass, self.get_listener(), backlog=25)
+        self.assertRaises(TypeError, self.ServerClass, self.get_listener(), backlog=25, handle=False)
 
     def test_backlog_is_accepted_for_address(self):
         self.server = self.ServerSubClass(('127.0.0.1', 0), backlog=25)
@@ -350,14 +348,14 @@ class ExpectedError(Exception):
     pass
 
 
-class TestSSLSocketNotAllowed(TestCase):
+if hasattr(socket, 'ssl'):
 
-    switch_expected = False
+    class TestSSLSocketNotAllowed(TestCase):
 
-    def get_spawn(self):
-        return gevent.spawn
+        switch_expected = False
 
-    if hasattr(socket, 'ssl'):
+        def get_spawn(self):
+            return gevent.spawn
 
         def test(self):
             from gevent.socket import ssl, socket
@@ -366,6 +364,7 @@ class TestSSLSocketNotAllowed(TestCase):
             listener.listen(5)
             listener = ssl(listener)
             self.assertRaises(TypeError, self.ServerSubClass, listener)
+
 
 # test non-socket.error exception in accept call: fatal
 # test error in spawn(): non-fatal
