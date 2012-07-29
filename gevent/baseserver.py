@@ -1,18 +1,14 @@
 """Base class for implementing servers"""
 # Copyright (c) 2009-2012 Denis Bilenko. See LICENSE for details.
+import sys
+import _socket
+import errno
 from gevent.greenlet import Greenlet, getfuncname
 from gevent.event import Event
-from gevent.six import string_types, integer_types
-import gevent
-import _socket
-import sys
-import errno
+from gevent.hub import string_types, integer_types, get_hub
 
 
 __all__ = ['BaseServer']
-
-
-DEFAULT_MAX_ACCEPT = 100
 
 
 class BaseServer(object):
@@ -46,11 +42,9 @@ class BaseServer(object):
     # Default is 100. Note, that in case of multiple working processes on the same
     # listening value, it should be set to a lower value. (pywsgi.WSGIServer sets it
     # to 1 when environ["wsgi.multiprocess"] is true)
-    max_accept = None
+    max_accept = 100
 
     _spawn = Greenlet.spawn
-
-    reuse_addr = 1
 
     # the default timeout that we wait for the client connections to close in stop()
     stop_timeout = 1
@@ -68,9 +62,7 @@ class BaseServer(object):
             self.set_spawn(spawn)
             self.set_handle(handle)
             self.delay = self.min_delay
-            self.loop = gevent.get_hub().loop
-            if self.max_accept is None:
-                self.max_accept = DEFAULT_MAX_ACCEPT
+            self.loop = get_hub().loop
             if self.max_accept < 1:
                 raise ValueError('max_accept must be positive int: %r' % (self.max_accept, ))
         except:
@@ -266,6 +258,10 @@ class BaseServer(object):
                 if self.pool is not None:
                     self.pool._semaphore.unlink(self._start_accepting_if_started)
 
+    @property
+    def closed(self):
+        return not hasattr(self, 'socket')
+
     def stop(self, timeout=None):
         """Stop accepting the connections and close the listening socket.
 
@@ -287,7 +283,7 @@ class BaseServer(object):
         try:
             self._stop_event.wait()
         finally:
-            gevent.spawn(self.stop, timeout=stop_timeout).join()
+            Greenlet.spawn(self.stop, timeout=stop_timeout).join()
 
     def is_fatal_error(self, ex):
         return isinstance(ex, _socket.error) and ex[0] in self.fatal_errors
@@ -313,7 +309,7 @@ def _parse_address(address):
                 host = ''
             return family, (host, int(port))
         else:
-            return _socket.AF_INET, ('', int(port))
+            return _socket.AF_INET, ('', int(address))
     elif isinstance(address, integer_types):
         return _socket.AF_INET, ('', int(address))
     else:

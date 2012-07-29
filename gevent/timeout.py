@@ -14,7 +14,7 @@ to arbitrary code.
 """
 
 import sys
-from gevent.hub import getcurrent, _NONE, get_hub, basestring
+from gevent.hub import getcurrent, _NONE, get_hub, string_types
 
 __all__ = ['Timeout',
            'with_timeout']
@@ -83,27 +83,24 @@ class Timeout(BaseException):
                 raise # not my timeout
     """
 
-    def __init__(self, seconds=None, exception=None):
+    def __init__(self, seconds=None, exception=None, ref=True, priority=-1):
         self.seconds = seconds
         self.exception = exception
-        if seconds is not None:
-            self.timer = get_hub().loop.timer(seconds)
-        else:
-            self.timer = get_hub().loop.timer(0.0)
+        self.timer = get_hub().loop.timer(seconds or 0.0, ref=ref, priority=priority)
 
     def start(self):
         """Schedule the timeout."""
         assert not self.pending, '%r is already started; to restart it, cancel it first' % self
         if self.seconds is None:  # "fake" timeout (never expires)
             pass
-        elif self.exception is None or self.exception is False or isinstance(self.exception, basestring):
+        elif self.exception is None or self.exception is False or isinstance(self.exception, string_types):
             # timeout that raises self
             self.timer.start(getcurrent().throw, self)
         else:  # regular timeout with user-provided exception
             self.timer.start(getcurrent().throw, self.exception)
 
     @classmethod
-    def start_new(cls, timeout=None, exception=None):
+    def start_new(cls, timeout=None, exception=None, ref=True):
         """Create a started :class:`Timeout`.
 
         This is a shortcut, the exact action depends on *timeout*'s type:
@@ -118,7 +115,7 @@ class Timeout(BaseException):
             if not timeout.pending:
                 timeout.start()
             return timeout
-        timeout = cls(timeout, exception)
+        timeout = cls(timeout, exception, ref=ref)
         timeout.start()
         return timeout
 

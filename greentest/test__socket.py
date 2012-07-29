@@ -16,9 +16,8 @@ class TestTCP(greentest.TestCase):
         greentest.TestCase.setUp(self)
         self.listener = greentest.tcp_listener(('127.0.0.1', 0))
 
-    def tearDown(self):
+    def cleanup(self):
         del self.listener
-        greentest.TestCase.tearDown(self)
 
     def create_connection(self):
         return socket.create_connection(('127.0.0.1', self.listener.getsockname()[1]))
@@ -196,8 +195,21 @@ class TestClosedSocket(greentest.TestCase):
         try:
             sock.send('a', timeout=1)
         except socket.error, ex:
-            if ex.errno != 9:
+            if ex[0] != 9:
                 raise
+
+
+class TestRef(greentest.TestCase):
+
+    switch_expected = False
+
+    def test(self):
+        sock = socket.socket()
+        assert sock.ref is True, sock.ref
+        sock.ref = False
+        assert sock.ref is False, sock.ref
+        assert sock._read_event.ref is False, sock.ref
+        assert sock._write_event.ref is False, sock.ref
 
 
 if __name__ == '__main__':

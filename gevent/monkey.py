@@ -22,7 +22,7 @@ Monkey patches:
   - :func:`socket.getaddrinfo`
   - :func:`socket.gethostbyname`
   - It is possible to disable dns patching by passing ``dns=False`` to :func:`patch_socket` of :func:`patch_all`
-  - If ssl is not available (Python < 2.6 without ``ssl`` and ``PyOpenSSL`` packages installed) then :func:`ssl` is removed from the target :mod:`socket` module.
+  - If ssl is not available (Python < 2.6 without ``ssl`` package installed) then :func:`ssl` is removed from the target :mod:`socket` module.
 
 * :mod:`ssl` module -- :func:`patch_ssl`
 
@@ -67,74 +67,91 @@ __all__ = ['patch_all',
            'patch_thread']
 
 
-def get_unpatched(name, items):
-    # QQQ would prefer to avoid importing gevent.xxx module just to get __target__
-    # XXX does not work for 'time', 'sleep'
-    source = getattr(__import__('gevent.' + name), name)
-    target = getattr(source, '__target__', name)
-    dest = __import__(target)
-    original = getattr(dest, 'monkey_original', dest)
-    if isinstance(items, basestring):
-        return getattr(original, items)
+# maps module name -> attribute name -> original item
+# e.g. "time" -> "sleep" -> built-in function sleep
+saved = {}
+
+
+def _get_original(name, items):
+    d = saved.get(name, {})
+    values = []
+    module = None
+    for item in items:
+        if item in d:
+            values.append(d[item])
+        else:
+            if module is None:
+                module = __import__(name)
+            values.append(getattr(module, item))
+    return values
+
+
+def get_original(name, item):
+    if isinstance(item, basestring):
+        return _get_original(name, [item])[0]
     else:
-        results = []
-        for item in items:
-            results.append(getattr(original, item))
-        return results
+        return _get_original(name, item)
 
 
-class original(object):
-    pass
+def patch_item(module, attr, newitem):
+    NONE = object()
+    olditem = getattr(module, attr, NONE)
+    if olditem is not NONE:
+        saved.setdefault(module.__name__, {}).setdefault(attr, olditem)
+    setattr(module, attr, newitem)
+
+
+def remove_item(module, attr):
+    NONE = object()
+    olditem = getattr(module, attr, NONE)
+    if olditem is NONE:
+        return
+    saved.setdefault(module.__name__, {}).setdefault(attr, olditem)
+    delattr(module, attr)
 
 
 def patch_module(name, items=None):
-    source = getattr(__import__('gevent.' + name), name)
-    target = getattr(source, '__target__', name)
-    dest = __import__(target)
-    monkey_original = dest.monkey_original = original()
-    count = 0
+    gevent_module = getattr(__import__('gevent.' + name), name)
+    module_name = getattr(gevent_module, '__target__', name)
+    module = __import__(module_name)
     if items is None:
-        items = getattr(source, '__implements__', None)
+        items = getattr(gevent_module, '__implements__', None)
         if items is None:
-            raise AttributeError('%r does not have __implements__' % source)
+            raise AttributeError('%r does not have __implements__' % gevent_module)
     for attr in items:
-        olditem = getattr(dest, attr, None)
-        newitem = getattr(source, attr)
-        if olditem is not newitem:
-            setattr(monkey_original, attr, olditem)
-            setattr(dest, attr, newitem)
-            count += 1
-    return count
+        patch_item(module, attr, getattr(gevent_module, attr))
 
 
 def patch_os():
-    """Replace :func:`os.fork` with :func:`gevent.fork`."""
+    """Replace :func:`os.fork` with :func:`gevent.fork`. Does nothing if fork is not available."""
     try:
         from gevent.hub import fork
     except ImportError:
         return
     import os
-    os.fork = fork
+    patch_item(os, 'fork', fork)
 
 
 def patch_time():
     """Replace :func:`time.sleep` with :func:`gevent.sleep`."""
     from gevent.hub import sleep
-    _time = __import__('time')
-    _time.sleep = sleep
+    import time
+    patch_item(time, 'sleep', sleep)
 
 
 def patch_thread(threading=True, _threading_local=True):
     """Replace the standard :mod:`thread` module to make it greenlet-based.
-    If *threading* is true (the default), also patch ``threading.local``.
+    If *threading* is true (the default), also patch ``threading``.
     If *_threading_local* is true (the default), also patch ``_threading_local.local``.
     """
-    if not patch_module('thread'):
-        return
+    patch_module('thread')
     from gevent.local import local
     if threading:
         from gevent import thread as green_thread
         threading = __import__('threading')
+        # QQQ Note, that importing threading results in get_hub() call.
+        # QQQ Would prefer not to import threading at all if it's not used;
+        # QQQ that should be possible with import hooks
         threading.local = local
         threading._start_new_thread = green_thread.start_new_thread
         threading._allocate_lock = green_thread.allocate_lock
@@ -165,7 +182,7 @@ def patch_socket(dns=True, aggressive=True):
     patch_module('socket', items=items)
     if aggressive:
         if 'ssl' not in socket.__implements__:
-            socket.__dict__.pop('ssl', None)
+            remove_item(socket, 'ssl')
 
 
 def patch_dns():
@@ -177,7 +194,7 @@ def patch_ssl():
     patch_module('ssl')
 
 
-def patch_select(aggressive=False):
+def patch_select(aggressive=True):
     """Replace :func:`select.select` with :func:`gevent.select.select`.
 
     If aggressive is true (the default), also remove other blocking functions the :mod:`select`.
@@ -188,13 +205,18 @@ def patch_select(aggressive=False):
         # since these are blocking we're removing them here. This makes some other
         # modules (e.g. asyncore)  non-blocking, as they use select that we provide
         # when none of these are available.
-        select.__dict__.pop('poll', None)
-        select.__dict__.pop('epoll', None)
-        select.__dict__.pop('kqueue', None)
-        select.__dict__.pop('kevent', None)
+        remove_item(select, 'poll')
+        remove_item(select, 'epoll')
+        remove_item(select, 'kqueue')
+        remove_item(select, 'kevent')
 
 
-def patch_all(socket=True, dns=True, time=True, select=True, thread=True, os=True, ssl=True, httplib=False, aggressive=True):
+def patch_subprocess():
+    patch_module('subprocess')
+
+
+def patch_all(socket=True, dns=True, time=True, select=True, thread=True, os=True, ssl=True, httplib=False,
+              subprocess=True, aggressive=True):
     """Do all of the default monkey patching (calls every other function in this module."""
     # order is important
     if os:
@@ -216,6 +238,8 @@ def patch_all(socket=True, dns=True, time=True, select=True, thread=True, os=Tru
             # in Python 2.5, 'ssl' is a standalone package not included in stdlib
     if httplib:
         raise ValueError('gevent.httplib is no longer provided, httplib must be False')
+    if subprocess:
+        patch_subprocess()
 
 
 if __name__ == '__main__':

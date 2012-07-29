@@ -2,8 +2,10 @@
 """Basic synchronization primitives: Event and AsyncResult"""
 
 import sys
-from gevent.hub import get_hub, getcurrent, _NONE
+from gevent.hub import get_hub, getcurrent, _NONE, PY3
 from gevent.timeout import Timeout
+if PY3:
+    xrange = range
 
 __all__ = ['Event', 'AsyncResult']
 
@@ -25,7 +27,7 @@ class Event(object):
         self._notifier = self.hub.loop.callback()
 
     def __str__(self):
-        return '<%s %s>' % (self.__class__.__name__, (self._flag and 'set') or 'clear')
+        return '<%s %s _links[%s]>' % (self.__class__.__name__, (self._flag and 'set') or 'clear', len(self._links))
 
     def is_set(self):
         """Return true if and only if the internal flag is true."""
@@ -153,6 +155,16 @@ class AsyncResult(object):
         self._exception = _NONE
         self.hub = get_hub()
         self._notifier = self.hub.loop.callback()
+
+    def __str__(self):
+        result = '<%s ' % (self.__class__.__name__, )
+        if self.value is not None or self._exception is not _NONE:
+            result += 'value=%r ' % self.value
+        if self._exception is not None and self._exception is not _NONE:
+            result += 'exception=%r ' % self._exception
+        if self._exception is _NONE:
+            result += 'unset '
+        return result + ' _links[%s]>' % len(self._links)
 
     def ready(self):
         """Return true if and only if it holds a value or an exception"""

@@ -1,5 +1,6 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
+# testrunner timeout: 300
 from __future__ import with_statement
 import sys
 import re
@@ -15,6 +16,8 @@ RAISE_TOO_SLOW = False
 # also test: '<broadcast>'
 
 resolver = gevent.get_hub().resolver
+sys.stderr.write('Resolver: %s\n' % resolver)
+
 if hasattr(resolver, 'ares'):
     accept_results = [
                   # Python's socketmodule.c randomly chooses between gaierror and herror when raising an exception
@@ -69,7 +72,7 @@ if hasattr(resolver, 'ares'):
 else:
     accept_results = [("gaierror(-5, 'No address associated with hostname')",
                        "gaierror(-2, 'Name or service not known')")]
-
+    resolver.pool.size = 1
 
 
 assert gevent_socket.gaierror is socket.gaierror
@@ -186,9 +189,10 @@ class TooSlow(AssertionError):
 
 class TestCase(greentest.TestCase):
 
-    __timeout__ = 15
+    __timeout__ = 60
+    switch_expected = None
 
-    def _test(self, func, *args):
+    def _test_once(self, func, *args):
         gevent_func = getattr(gevent_socket, func)
         real_func = getattr(socket, func)
         real_result, time_real = run(real_func, *args)
@@ -221,12 +225,21 @@ class TestCase(greentest.TestCase):
             if times is None:
                 times = time_gevent / time_real
             params = (func, args, times, time_gevent * 1000.0, time_real * 1000.0)
-            msg = 'gevent_socket.%s%s is %.1f times slower (%.3fms versus %.3fms)' % params
-            if RAISE_TOO_SLOW:
-                raise TooSlow(msg)
-            else:
-                sys.stderr.write('WARNING: %s\n' % msg)
+            raise TooSlow('gevent_socket.%s%s is %.1f times slower (%.3fms versus %.3fms)' % params)
         return result
+
+    def _test(self, func, *args):
+        try:
+            return self._test_once(func, *args)
+        except AssertionError, ex:
+            sys.stderr.write('\n%s (retrying)\n' % ex)
+        try:
+            return self._test_once(func, *args)
+        except TooSlow, ex:
+            if RAISE_TOO_SLOW:
+                raise
+            else:
+                sys.stderr.write('WARNING: %s\n' % ex)
 
     def assertEqualResults(self, real_result, gevent_result, func):
         if type(real_result) is TypeError and type(gevent_result) is TypeError:
@@ -243,14 +256,14 @@ class TestCase(greentest.TestCase):
 
 
 class TestTypeError(TestCase):
-    switch_expected = False
+    pass
 
 add(TestTypeError, None)
 add(TestTypeError, 25)
 
 
 class TestHostname(TestCase):
-    switch_expected = False
+    pass
 
 add(TestHostname, socket.gethostname, call=True)
 
@@ -258,25 +271,26 @@ add(TestHostname, socket.gethostname, call=True)
 class TestLocalhost(TestCase):
     # certain tests in test_patched_socket.py only work if getaddrinfo('localhost') does not switch
     # (e.g. NetworkConnectionAttributesTest.testSourceAddress)
-    switch_expected = False
+    pass
+    #switch_expected = False
 
 add(TestLocalhost, 'localhost')
 
 
 class TestNonexistent(TestCase):
-    switch_expected = True
+    pass
 
 add(TestNonexistent, 'nonexistentxxxyyy')
 
 
 class Test1234(TestCase):
-    switch_expected = None
+    pass
 
 add(Test1234, '1.2.3.4')
 
 
 class Test127001(TestCase):
-    switch_expected = False
+    pass
 
 add(Test127001, '127.0.0.1')
 
@@ -288,7 +302,7 @@ add(Test127001, '127.0.0.1')
 
 
 class TestEtcHosts(TestCase):
-    switch_expected = None
+    pass
 
 try:
     etc_hosts = open('/etc/hosts').read()
@@ -302,7 +316,7 @@ for ip, host in re.findall(r'^\s*(\d+\.\d+\.\d+\.\d+)\s+([^\s]+)', etc_hosts, re
 
 
 class TestGeventOrg(TestCase):
-    switch_expected = True
+    pass
 
 add(TestGeventOrg, 'gevent.org')
 
@@ -333,27 +347,19 @@ class TestFamily(TestCase):
     def test_inet(self):
         self.assertEqual(gevent_socket.getaddrinfo('gevent.org', None, socket.AF_INET), self.getresult())
 
-    def test_inet6(self):
-        expected = socket.gaierror(1, 'ARES_ENODATA: DNS server returned answer with no data')
-        self.assert_error(expected, gevent_socket.getaddrinfo, 'gevent.org', None, socket.AF_INET6)
-
     def test_unspec(self):
         self.assertEqual(gevent_socket.getaddrinfo('gevent.org', None, socket.AF_UNSPEC), self.getresult())
 
     def test_badvalue(self):
-        self.switch_expected = False
         self._test('getaddrinfo', 'gevent.org', None, 255)
         self._test('getaddrinfo', 'gevent.org', None, 255000)
         self._test('getaddrinfo', 'gevent.org', None, -1)
 
     def test_badtype(self):
-        self.switch_expected = False
         self._test('getaddrinfo', 'gevent.org', 'x')
 
 
 class Test_getaddrinfo(TestCase):
-
-    switch_expected = True
 
     def _test_getaddrinfo(self, *args):
         self._test('getaddrinfo', *args)
@@ -387,11 +393,10 @@ class Test_getaddrinfo(TestCase):
 
 
 class TestInternational(TestCase):
-    switch_expected = None
+    pass
 
 add(TestInternational, u'президент.рф', 'russian')
 add(TestInternational, u'президент.рф'.encode('idna'), 'idna')
-
 
 
 class TestInterrupted_gethostbyname(greentest.GenericWaitTestCase):
@@ -417,7 +422,7 @@ class TestInterrupted_gethostbyname(greentest.GenericWaitTestCase):
 
 
 class Test6(TestCase):
-    switch_expected = True
+    pass
 
     # host that only has AAAA record
     host = 'aaaa.test-ipv6.com'
@@ -450,22 +455,20 @@ add(Test6_ds, Test6_ds.host)
 
 
 class TestBadName(TestCase):
-    switch_expected = True
+    pass
 
 add(TestBadName, 'xxxxxxxxxxxx')
 
 
 class TestBadIP(TestCase):
-    switch_expected = True
+    pass
 
 add(TestBadIP, '1.2.3.400')
 
 
 class Test_getnameinfo_127001(TestCase):
-    switch_expected = False
 
     def test(self):
-        self.switch_expected = False
         assert gevent_socket.getnameinfo is not socket.getnameinfo
         self._test('getnameinfo', ('127.0.0.1', 80), 0)
 
@@ -482,7 +485,6 @@ class Test_getnameinfo_127001(TestCase):
 
 
 class Test_getnameinfo_geventorg(TestCase):
-    switch_expected = True
 
     def test_NUMERICHOST(self):
         self._test('getnameinfo', ('gevent.org', 80), 0)
@@ -502,7 +504,6 @@ class Test_getnameinfo_geventorg(TestCase):
 
 
 class Test_getnameinfo_fail(TestCase):
-    switch_expected = False
 
     def test_port_string(self):
         self._test('getnameinfo', ('www.gevent.org', 'http'), 0)

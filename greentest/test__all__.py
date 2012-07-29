@@ -5,7 +5,12 @@ import types
 from greentest import walk_modules
 
 
-MAPPING = {'gevent.local': '_threading_local'}
+MAPPING = {'gevent.local': '_threading_local',
+           'gevent.socket': 'socket',
+           'gevent.select': 'select',
+           'gevent.ssl': 'ssl',
+           'gevent.thread': 'thread',
+           'gevent.subprocess': 'subprocess'}
 
 
 class ANY(object):
@@ -15,7 +20,7 @@ class ANY(object):
 ANY = ANY()
 
 NOT_IMPLEMENTED = {
-    'socket': ['CAPI', 'gethostbyaddr', 'gethostbyname_ex', 'getnameinfo'],
+    'socket': ['CAPI'],
     'thread': ['allocate', 'exit_thread', 'interrupt_main', 'start_new'],
     'select': ANY}
 
@@ -79,7 +84,7 @@ class Test(unittest.TestCase):
         for name in self.__imports__:
             item = getattr(self.module, name)
             stdlib_item = getattr(self.stdlib_module, name)
-            assert item is stdlib_item, (item, stdlib_item)
+            assert item is stdlib_item, (name, item, stdlib_item)
 
     def check_extensions_actually_extend(self):
         """Check that the module actually defines new entries in __extensions__"""
@@ -128,9 +133,6 @@ are missing from %r:
         exec "import %s" % modname in {}
         self.module = sys.modules[modname]
 
-        if modname == 'gevent.six':
-            return
-
         self.check_all()
 
         self.__implements__ = getattr(self.module, '__implements__', None)
@@ -138,22 +140,19 @@ are missing from %r:
         self.__extensions__ = getattr(self.module, '__extensions__', [])
 
         self.stdlib_name = MAPPING.get(modname)
-        if self.stdlib_name is None:
-            self.stdlib_name = modname.replace('gevent.', '')
-        try:
-            self.stdlib_module = __import__(self.stdlib_name)
-        except ImportError:
-            self.stdlib_module = None
+        self.stdlib_module = None
+
+        if self.stdlib_name is not None:
+            try:
+                self.stdlib_module = __import__(self.stdlib_name)
+            except ImportError:
+                pass
 
         self.check_implements_presence_justified()
 
         # use __all__ as __implements__
         if self.__implements__ is None:
             self.__implements__ = sorted(self.module.__all__)
-
-        if modname == 'gevent.greenlet':
-            # 'greenlet' is not a corresponding standard module for gevent.greenlet
-            return
 
         if self.stdlib_module is None:
             return

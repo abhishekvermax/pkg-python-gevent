@@ -1,6 +1,15 @@
 import sys
 import os
 import imp
+import tempfile
+import glob
+from pipes import quote
+
+chdir = os.path.join(tempfile.gettempdir(), 'gevent-test')
+try:
+    os.makedirs(chdir)
+except EnvironmentError:
+    pass
 
 version = '%s.%s' % sys.version_info[:2]
 
@@ -23,10 +32,10 @@ class ContainsAll(object):
 
 
 def patch_all(timeout=None):
+    import greentest
     from gevent import monkey
     monkey.patch_all(aggressive=True)
     import unittest
-    import greentest
     unittest.TestCase = greentest.TestCase
     unittest.TestCase.check_totalrefcount = False
     unittest.TestCase.error_fatal = False
@@ -43,17 +52,17 @@ def imp_find_dotted_module(name):
     return result
 
 
-def prepare_stdlib_test(filename):
+def prepare_stdlib_test(filename, assets=None):
     patch_all(timeout=20)
     import test
     try:
-        from test import test_support
-    except ImportError:
-        try:
+        if sys.version_info[0] >= 3:
             from test import support as test_support
-        except ImportError:
-            sys.stderr.write('test.__file__ = %s\n' % test.__file__)
-            raise
+        else:
+            from test import test_support
+    except ImportError:
+        sys.stderr.write('test.__file__ = %s\n' % test.__file__)
+        raise
     test_support.use_resources = ContainsAll()
 
     name = os.path.splitext(os.path.basename(filename))[0].replace('_patched', '')
@@ -74,4 +83,24 @@ def prepare_stdlib_test(filename):
     module_code = compile(module_source, _filename, 'exec')
 
     print >> sys.stderr, 'Testing %s with monkey patching' % _filename
+
+    copy_assets(os.path.dirname(_filename), assets)
+    os.chdir(chdir)
     return module_code
+
+
+def copy_assets(directory, assets):
+    if assets:
+        cwd = os.getcwd()
+        os.chdir(directory)
+        try:
+            if isinstance(assets, basestring):
+                assets = glob.glob(assets)
+            for asset in assets:
+                os.system('cp -r %s %s' % (quote(asset), quote(os.path.join(chdir, asset))))
+        finally:
+            os.chdir(cwd)
+
+
+def run(filename, d, assets=None):
+    exec prepare_stdlib_test(filename, assets) in d

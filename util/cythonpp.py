@@ -17,6 +17,7 @@ else:
 _ex = lambda: sys.exc_info()[1]
 
 
+CYTHON = os.environ.get('CYTHON') or 'cython'
 DEBUG = False
 WRITE_OUTPUT = False
 
@@ -73,7 +74,7 @@ def process_filename(filename, output_filename=None):
     sources = []
 
     counter = 0
-    for configuration, lines in preprocessed.items():
+    for configuration, lines in sorted(preprocessed.items()):
         counter += 1
         value = ''.join(lines)
         sourcehash = md5(value.encode("utf-8")).hexdigest()
@@ -86,8 +87,10 @@ def process_filename(filename, output_filename=None):
             atomic_write(output_filename + '.%s' % counter, output)
         sources.append(attach_tags(output, configuration))
 
-    log('Generating %s', output_filename)
-    generate_merged(output_filename, sources)
+    sys.stderr.write('Generating %s ' % output_filename)
+    result = generate_merged(output_filename, sources)
+    atomic_write(output_filename, result)
+    sys.stderr.write('%s bytes\n' % len(result))
 
     if filename != pyx_filename:
         log('Saving %s', pyx_filename)
@@ -98,7 +101,7 @@ def generate_merged(output_filename, sources):
     result = []
     for line in produce_preprocessor(merge(sources)):
         result.append(line.replace(newline_token, '\n'))
-    atomic_write(output_filename, ''.join(result))
+    return ''.join(result)
 
 
 def preprocess_filename(filename, config):
@@ -312,7 +315,7 @@ def format_cond(cond):
 def format_tag(tag):
     if not isinstance(tag, set):
         raise TypeError(repr(tag))
-    return ' && '.join([format_cond(x) for x in tag])
+    return ' && '.join([format_cond(x) for x in sorted(tag)])
 
 
 def format_tags(tags):
@@ -519,9 +522,11 @@ def atomic_write(filename, data):
 
 def run_cython(filename, sourcehash, output_filename, banner, comment, cache={}):
     result = cache.get(sourcehash)
+    command = '%s -o %s %s' % (CYTHON, pipes.quote(output_filename), pipes.quote(filename))
     if result is not None:
+        log('Reusing %s  # %s', command, comment)
         return result
-    system('cython -o %s %s' % (pipes.quote(output_filename), pipes.quote(filename)), comment)
+    system(command, comment)
     result = postprocess_cython_output(output_filename, banner)
     cache[sourcehash] = result
     return result
@@ -725,7 +730,7 @@ def combinations(iterable, r):
     n = len(pool)
     if r > n:
         return
-    indices = range(r)
+    indices = list(range(r))
     yield tuple(pool[i] for i in indices)
     while True:
         for i in reversed(range(r)):
@@ -742,7 +747,7 @@ def combinations(iterable, r):
 def product(*args, **kwds):
     # product('ABCD', 'xy') --> Ax Ay Bx By Cx Cy Dx Dy
     # product(range(2), repeat=3) --> 000 001 010 011 100 101 110 111
-    pools = map(tuple, args) * kwds.get('repeat', 1)
+    pools = tuple(map(tuple, args)) * kwds.get('repeat', 1)
     result = [[]]
     for pool in pools:
         result = [x+[y] for x in result for y in pool]
