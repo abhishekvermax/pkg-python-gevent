@@ -1,9 +1,8 @@
 # Copyright (c) 2009-2012 Denis Bilenko. See LICENSE for details.
 
 import sys
-from gevent.hub import greenlet, getcurrent, get_hub, GreenletExit, Waiter
+from gevent.hub import greenlet, getcurrent, get_hub, GreenletExit, Waiter, PY3
 from gevent.timeout import Timeout
-from gevent import six
 
 
 __all__ = ['Greenlet',
@@ -19,6 +18,8 @@ class SpawnedLink(object):
     __slots__ = ['callback']
 
     def __init__(self, callback):
+        if not callable(callback):
+            raise TypeError("Expected callable: %r" % (callback, ))
         self.callback = callback
 
     def __call__(self, source):
@@ -88,7 +89,7 @@ class Greenlet(greenlet):
         # needed by killall
         return self.parent.loop
 
-    if six.PY3:
+    if PY3:
         def __bool__(self):
             return self._start_event is not None and self._exception is _NONE
     else:
@@ -222,6 +223,8 @@ class Greenlet(greenlet):
 
         `Changed in version 0.13.0:` *block* is now ``True`` by default.
         """
+        # XXX this function should not switch out if greenlet is not started but it does
+        # XXX fix it (will have to override 'dead' property of greenlet.greenlet)
         if self._start_event is None:
             self._start_event = _dummy_event
         else:
@@ -392,8 +395,13 @@ def _kill(greenlet, exception, waiter):
     waiter.switch()
 
 
+try:
+    xrange
+except NameError:
+    xrange = range
+
+
 def joinall(greenlets, timeout=None, raise_error=False, count=None):
-    xrange = six.moves.xrange
     from gevent.queue import Queue
     queue = Queue()
     put = queue.put
@@ -462,14 +470,14 @@ def killall(greenlets, exception=GreenletExit, block=True, timeout=None):
         loop.run_callback(_killall, greenlets, exception)
 
 
-def getfuncname(func):
-    try:
-        six.get_method_self(func)
-        is_bound_method = True
-    except AttributeError:
-        is_bound_method = False
+if PY3:
+    _meth_self = "__self__"
+else:
+    _meth_self = "im_self"
 
-    if not is_bound_method:
+
+def getfuncname(func):
+    if not hasattr(func, _meth_self):
         try:
             funcname = func.__name__
         except AttributeError:

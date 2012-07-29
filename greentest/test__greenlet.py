@@ -100,13 +100,13 @@ class TestUnlink(greentest.TestCase):
 
     def setUp(self):
         greentest.TestCase.setUp(self)
-        self.p = gevent.spawn(test_func)
+        self.p = gevent.spawn(dummy_test_func)
 
     def _test_func(self, link):
         p = self.p
-        link(test_func)
+        link(dummy_test_func)
         assert len(p._links) == 1, p._links
-        p.unlink(test_func)
+        p.unlink(dummy_test_func)
         assert not p._links, p._links
 
         link(self.setUp)
@@ -122,28 +122,6 @@ class TestUnlink(greentest.TestCase):
 
     def test_func_link_exception(self):
         self._test_func(self.p.link_exception)
-
-    def _test_greenlet(self, link):
-        p = self.p
-        link(getcurrent())
-        assert len(p._links) == 1, p._links
-        p.unlink(getcurrent())
-        assert not p._links, p._links
-
-        g = gevent.Greenlet()
-        link(g)
-        assert len(p._links) == 1, p._links
-        p.unlink(g)
-        assert not p._links, p._links
-
-    def test_greenlet_link(self):
-        self._test_greenlet(self.p.link)
-
-    def test_greenlet_link_value(self):
-        self._test_greenlet(self.p.link_value)
-
-    def test_greenlet_link_exception(self):
-        self._test_greenlet(self.p.link_exception)
 
 
 class LinksTestCase(greentest.TestCase):
@@ -200,7 +178,6 @@ class TestReturn_link(LinksTestCase):
         self.p = gevent.spawn(return25)
         for _ in range(3):
             self._test_return(self.p, 25, sleep0)
-        self.cleanup()
         self.p.kill()
 
     def _test_return(self, p, result, action):
@@ -288,7 +265,6 @@ class TestStuff(greentest.TestCase):
         e = AsyncResult()
         x.link(e)
         self.assertEqual(e.get(), 1)
-        #self.assertEqual([proc.waitall([X]) for X in [x, y, z]], [[1], [2], [3]])
 
     def test_wait_error(self):
         def x():
@@ -296,10 +272,9 @@ class TestStuff(greentest.TestCase):
             return 1
         x = gevent.spawn(x)
         y = gevent.spawn(lambda: getcurrent().throw(ExpectedError('test_wait_error')))
-        x.link(y)
-        y.link(x)
         self.assertRaises(ExpectedError, gevent.joinall, [x, y], raise_error=True)
         self.assertRaises(ExpectedError, gevent.joinall, [y], raise_error=True)
+        x.join()
 
     def test_joinall_exception_order(self):
         # if there're several exceptions raised, the earliest one must be raised by joinall
@@ -404,7 +379,7 @@ class TestStuff(greentest.TestCase):
         sleep(DELAY)
 
 
-def test_func(*args):
+def dummy_test_func(*args):
     pass
 
 
@@ -419,12 +394,12 @@ hexobj = re.compile('-?0x[0123456789abcdef]+L?', re.I)
 class TestStr(greentest.TestCase):
 
     def test_function(self):
-        g = gevent.Greenlet.spawn(test_func)
-        self.assertEqual(hexobj.sub('X', str(g)), '<Greenlet at X: test_func>')
+        g = gevent.Greenlet.spawn(dummy_test_func)
+        self.assertEqual(hexobj.sub('X', str(g)), '<Greenlet at X: dummy_test_func>')
         assert_not_ready(g)
         g.join()
         assert_ready(g)
-        self.assertEqual(hexobj.sub('X', str(g)), '<Greenlet at X: test_func>')
+        self.assertEqual(hexobj.sub('X', str(g)), '<Greenlet at X: dummy_test_func>')
 
     def test_method(self):
         g = gevent.Greenlet.spawn(A().method)
@@ -442,31 +417,31 @@ class TestStr(greentest.TestCase):
 class TestJoin(greentest.GenericWaitTestCase):
 
     def wait(self, timeout):
-        self.g = gevent.spawn(gevent.sleep, 10)
-        return self.g.join(timeout=timeout)
-
-    def cleanup(self):
-        self.g.kill()
+        g = gevent.spawn(gevent.sleep, 10)
+        try:
+            return g.join(timeout=timeout)
+        finally:
+            g.kill()
 
 
 class TestGet(greentest.GenericGetTestCase):
 
     def wait(self, timeout):
-        self.g = gevent.spawn(gevent.sleep, 10)
-        return self.g.get(timeout=timeout)
-
-    def cleanup(self):
-        self.g.kill()
+        g = gevent.spawn(gevent.sleep, 10)
+        try:
+            return g.get(timeout=timeout)
+        finally:
+            g.kill()
 
 
 class TestJoinAll(greentest.GenericWaitTestCase):
 
     def wait(self, timeout):
-        self.g = gevent.spawn(gevent.sleep, 10)
-        gevent.joinall([self.g], timeout=timeout)
-
-    def cleanup(self):
-        self.g.kill()
+        g = gevent.spawn(gevent.sleep, 10)
+        try:
+            gevent.joinall([g], timeout=timeout)
+        finally:
+            g.kill()
 
 
 class TestBasic(greentest.TestCase):
@@ -612,8 +587,8 @@ class TestBasic(greentest.TestCase):
         link_test = []
         g = gevent.spawn(gevent.sleep, 10)
         g.link(lambda x: link_test.append(x))
-        gevent.sleep(0.01)
         self._test_kill(g, block=block)
+        gevent.sleep(0.01)
         assert link_test == [g]
 
     def test_kill_running_block(self):
@@ -649,6 +624,24 @@ def assert_ready(g):
 def assert_not_ready(g):
     assert not g.dead, g
     assert not g.ready(), g
+
+
+class TestRef(greentest.TestCase):
+
+    def test_init(self):
+        self.switch_expected = False
+        # in python-dbg mode this will check that Greenlet() does not create any circular refs
+        gevent.Greenlet()
+
+    def test_kill_scheduled(self):
+        gevent.spawn(gevent.sleep, 10).kill()
+
+    def test_kill_started(self):
+        g = gevent.spawn(gevent.sleep, 10)
+        try:
+            gevent.sleep(0.001)
+        finally:
+            g.kill()
 
 
 X = object()

@@ -29,10 +29,10 @@ import os
 from os.path import basename, splitext
 import gevent
 from patched_tests_setup import get_switch_expected
-try:
-    from functools import wraps
-except ImportError:
-    wraps = lambda *args: (lambda x: x)
+from gevent.hub import _get_hub
+from functools import wraps
+import contextlib
+import gc
 
 VERBOSE = sys.argv.count('-v') > 1
 
@@ -66,48 +66,65 @@ def wrap_refcount(method):
         deltas = []
         d = None
         try:
-            for _ in xrange(4):
+            while True:
                 d = gettotalrefcount()
+                self.setUp()
                 method(self, *args, **kwargs)
-                if hasattr(self, 'cleanup'):
-                    self.cleanup()
+                self.tearDown()
                 if 'urlparse' in sys.modules:
                     sys.modules['urlparse'].clear_cache()
                 d = gettotalrefcount() - d
                 deltas.append(d)
-                if len(deltas) >= 2 and deltas[-1] <= 0 and deltas[-2] <= 0:
+                # the following configurations are classified as "no leak"
+                # [0, 0]
+                # [x, 0, 0]
+                # [... a, b, c, d]  where a+b+c+d = 0
+                #
+                # the following configurations are classified as "leak"
+                # [... z, z, z]  where z > 0
+                if deltas[-2:] == [0, 0] and len(deltas) in (2, 3):
                     break
-                elif len(deltas) >= 3 and deltas[-3:] == [-1, 1, -1]:
-                    # as seen on test__server.py: test_assertion_in_blocking_func (__main__.TestNoneSpawn)
+                elif deltas[-3:] == [0, 0, 0]:
                     break
-            else:
-                raise AssertionError('refcount increased by %r' % (deltas, ))
+                elif len(deltas) >= 4 and sum(deltas[-4:]) == 0:
+                    break
+                elif len(deltas) >= 3 and deltas[-1] > 0 and deltas[-1] == deltas[-2] and deltas[-2] == deltas[-3]:
+                    raise AssertionError('refcount increased by %r' % (deltas, ))
+                # OK, we don't know for sure yet. Let's search for more
+                if sum(deltas[-3:]) <= 0 or sum(deltas[-4:]) <= 0 or deltas[-4:].count(0) >= 2:
+                    # this is suspicious, so give a few more runs
+                    limit = 10
+                else:
+                    limit = 6
+                if len(deltas) >= limit:
+                    raise AssertionError('refcount increased by %r' % (deltas, ))
         finally:
             gc.collect()
             gc.enable()
+        self.skipTearDown = True
     return wrapped
 
 
 def wrap_error_fatal(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        SYSTEM_ERROR = self._hub.SYSTEM_ERROR
-        self._hub.SYSTEM_ERROR = object
+        SYSTEM_ERROR = gevent.get_hub().SYSTEM_ERROR
+        gevent.get_hub().SYSTEM_ERROR = object
         try:
             return method(self, *args, **kwargs)
         finally:
-            self._hub.SYSTEM_ERROR = SYSTEM_ERROR
+            gevent.get_hub().SYSTEM_ERROR = SYSTEM_ERROR
     return wrapped
 
 
 def wrap_restore_handle_error(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        old = self._hub.handle_error
+        old = gevent.get_hub().handle_error
         try:
             return method(self, *args, **kwargs)
         finally:
-            self._hub.handle_error = old
+            gevent.get_hub().handle_error = old
         if self.peek_error()[0] is not None:
             gevent.getcurrent().throw(*self.peek_error()[1:])
     return wrapped
@@ -135,6 +152,8 @@ class TestCaseMetaClass(type):
         timeout = classDict.get('__timeout__', 'NONE')
         if timeout == 'NONE':
             timeout = getattr(bases[0], '__timeout__', None)
+            if gettotalrefcount is not None and timeout is not None:
+                timeout *= 6
         check_totalrefcount = _get_class_attr(classDict, bases, 'check_totalrefcount', True)
         error_fatal = _get_class_attr(classDict, bases, 'error_fatal', True)
         for key, value in classDict.items():
@@ -159,12 +178,6 @@ class TestCase(BaseTestCase):
     __timeout__ = 1
     switch_expected = 'default'
     error_fatal = True
-    _switch_count = None
-
-    def __init__(self, *args, **kwargs):
-        BaseTestCase.__init__(self, *args, **kwargs)
-        self._hub = gevent.hub.get_hub()
-        self._switch_count = None
 
     def run(self, *args, **kwargs):
         if self.switch_expected == 'default':
@@ -172,15 +185,14 @@ class TestCase(BaseTestCase):
         return BaseTestCase.run(self, *args, **kwargs)
 
     def setUp(self):
-        self._hub.loop.update()
-        if hasattr(self._hub, 'switch_count'):
-            self._switch_count = self._hub.switch_count
+        self.initial_switch_count = getattr(_get_hub(), 'switch_count', None)
 
     def tearDown(self):
+        if getattr(self, 'skipTearDown', False):
+            return
         if hasattr(self, 'cleanup'):
             self.cleanup()
         if self.switch_count is not None:
-            msg = None
             if self.switch_count < 0:
                 raise AssertionError('hub.switch_count decreased???')
             if self.switch_expected is None:
@@ -196,8 +208,14 @@ class TestCase(BaseTestCase):
 
     @property
     def switch_count(self):
-        if self._switch_count is not None and hasattr(self._hub, 'switch_count'):
-            return self._hub.switch_count - self._switch_count
+        if self.switch_expected is None:
+            return
+        if not hasattr(self, 'initial_switch_count'):
+            raise AssertionError('Cannot check switch_count (setUp() was not called)')
+        if self.initial_switch_count is None:
+            return
+        current = getattr(_get_hub(), 'switch_count', 0)
+        return current - self.initial_switch_count
 
     @property
     def testname(self):
@@ -209,16 +227,7 @@ class TestCase(BaseTestCase):
 
     @property
     def modulename(self):
-        test_method = getattr(self, self.testname)
-        try:
-            func = test_method.__func__
-        except AttributeError:
-            func = test_method.im_func
-
-        try:
-            return func.func_code.co_filename
-        except AttributeError:
-            return func.__code__.co_filename
+        return os.path.basename(sys.modules[self.__class__.__module__].__file__).rsplit('.', 1)[0]
 
     @property
     def fullname(self):
@@ -229,13 +238,13 @@ class TestCase(BaseTestCase):
 
     def expect_one_error(self):
         assert self._error == self._none, self._error
-        self._old_handle_error = self._hub.handle_error
-        self._hub.handle_error = self._store_error
+        self._old_handle_error = gevent.get_hub().handle_error
+        gevent.get_hub().handle_error = self._store_error
 
     def _store_error(self, where, type, value, tb):
         del tb
         if self._error != self._none:
-            self._hub.parent.throw(type, value)
+            gevent.get_hub().parent.throw(type, value)
         else:
             self._error = (where, type, value)
 
@@ -278,7 +287,7 @@ if gettotalrefcount is None:
 
 
 def test_outer_timeout_is_not_lost(self):
-    timeout = gevent.Timeout.start_new(0.001)
+    timeout = gevent.Timeout.start_new(0.001, ref=False)
     try:
         try:
             result = self.wait(timeout=1)
@@ -374,7 +383,7 @@ def walk_modules(basedir=None, modpath=None, include_so=False):
                 for p, m in walk_modules(path, modpath + fn + "."):
                     yield p, m
             continue
-        if fn.endswith('.py') and fn not in ['__init__.py', 'core.py', 'ares.py']:
+        if fn.endswith('.py') and fn not in ['__init__.py', 'core.py', 'ares.py', '_util.py', '_semaphore.py']:
             yield path, modpath + fn[:-3]
         elif include_so and fn.endswith('.so'):
             if fn.endswith('_d.so'):
@@ -400,3 +409,20 @@ def tcp_listener(address, backlog=50, reuse_addr=True):
     sock = socket.socket()
     bind_and_listen(sock)
     return sock
+
+
+@contextlib.contextmanager
+def disabled_gc():
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+def get_number_open_files():
+    if os.path.exists('/proc/'):
+        fd_directory = '/proc/%d/fd' % os.getpid()
+        return len(os.listdir(fd_directory))

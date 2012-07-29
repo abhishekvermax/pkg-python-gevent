@@ -1,9 +1,15 @@
-# Copyright (c) 2009-2011 Denis Bilenko. See LICENSE for details.
+# Copyright (c) 2009-2012 Denis Bilenko. See LICENSE for details.
 
 import sys
 import os
 import traceback
-from gevent import core
+try:
+    from gevent._util import set_exc_info
+except ImportError, ex:
+    sys.stderr.write('Failed to import set_exc_info: %s\n' % ex)
+
+    def set_exc_info(*args):
+        pass
 
 
 __all__ = ['getcurrent',
@@ -12,10 +18,22 @@ __all__ = ['getcurrent',
            'sleep',
            'kill',
            'signal',
+           'reinit',
            'fork',
            'get_hub',
            'Hub',
            'Waiter']
+
+
+PY3 = sys.version_info[0] >= 3
+
+
+if PY3:
+    string_types = str,
+    integer_types = int,
+else:
+    string_types = basestring,
+    integer_types = (int, long)
 
 
 def __import_py_magic_greenlet():
@@ -76,7 +94,7 @@ def spawn_raw(function, *args, **kwargs):
     return g
 
 
-def sleep(seconds=0):
+def sleep(seconds=0, ref=True):
     """Put the current greenlet to sleep for at least *seconds*.
 
     *seconds* may be specified as an integer, or a float if fractional seconds
@@ -85,14 +103,17 @@ def sleep(seconds=0):
     If *seconds* is equal to or less than zero, yield control the other coroutines
     without actually putting the process to sleep. The :class:`core.idle` watcher
     with the highest priority is used to achieve that.
+
+    If *ref* is false, the greenlet running sleep() will not prevent gevent.run()
+    from exiting.
     """
     hub = get_hub()
     loop = hub.loop
     if seconds <= 0:
-        watcher = loop.idle()
+        watcher = loop.idle(ref=ref)
         watcher.priority = loop.MAXPRI
     else:
-        watcher = loop.timer(seconds)
+        watcher = loop.timer(seconds, ref=ref)
     hub.wait(watcher)
 
 
@@ -156,12 +177,18 @@ class signal(object):
             self.hub.handle_error(None, *sys.exc_info())
 
 
+def reinit():
+    hub = _get_hub()
+    if hub is not None:
+        hub.loop.reinit()
+
+
 if _original_fork is not None:
 
     def fork():
         result = _original_fork()
         if not result:
-            get_hub().loop.reinit()
+            reinit()
         return result
 
 
@@ -211,40 +238,50 @@ def set_hub(hub):
 
 
 if sys.version_info[0] >= 3:
-    basestring = (str, bytes)
-
     def exc_clear():
         pass
 else:
-    basestring = basestring
     exc_clear = sys.exc_clear
 
 
 def _import(path):
     if isinstance(path, list):
-        error = ImportError('Cannot import from empty list: %r' % (path, ))
-        for item in path:
+        if not path:
+            raise ImportError('Cannot import from empty list: %r' % (path, ))
+        for item in path[:-1]:
             try:
                 return _import(item)
             except ImportError:
-                error = sys.exc_info()[1]
-        raise error
-    if not isinstance(path, basestring):
+                pass
+        return _import(path[-1])
+    if not isinstance(path, string_types):
         return path
     if '.' not in path:
-        raise ImportError("Cannot import %r (required format: module.class)" % path)
-    module, item = path.rsplit('.', 1)
-    x = __import__(module)
-    for attr in path.split('.')[1:]:
-        x = getattr(x, attr, _NONE)
-        if x is _NONE:
-            raise ImportError('Cannot import name %r from %r' % (attr, x))
-    return x
+        raise ImportError("Cannot import %r (required format: [path/][package.]module.class)" % path)
+    if '/' in path:
+        package_path, path = path.rsplit('/', 1)
+        sys.path = [package_path] + sys.path
+    else:
+        package_path = None
+    try:
+        module, item = path.rsplit('.', 1)
+        x = __import__(module)
+        for attr in path.split('.')[1:]:
+            oldx = x
+            x = getattr(x, attr, _NONE)
+            if x is _NONE:
+                raise ImportError('Cannot import %r from %r' % (attr, oldx))
+        return x
+    finally:
+        try:
+            sys.path.remove(package_path)
+        except ValueError:
+            pass
 
 
 def config(default, envvar):
     result = os.environ.get(envvar) or default
-    if isinstance(result, basestring):
+    if isinstance(result, string_types):
         return result.split(',')
     return result
 
@@ -268,12 +305,12 @@ class Hub(greenlet):
     SYSTEM_ERROR = (KeyboardInterrupt, SystemExit, SystemError)
     NOT_ERROR = (GreenletExit, SystemExit)
     loop_class = config('gevent.core.loop', 'GEVENT_LOOP')
-    resolver_class = ['gevent.resolver_ares.Resolver',
-                      'gevent.resolver_thread.Resolver',
+    resolver_class = ['gevent.resolver_thread.Resolver',
+                      'gevent.resolver_ares.Resolver',
                       'gevent.socket.BlockingResolver']
     resolver_class = resolver_config(resolver_class, 'GEVENT_RESOLVER')
     threadpool_class = config('gevent.threadpool.ThreadPool', 'GEVENT_THREADPOOL')
-    DEFAULT_BACKEND = config(None, 'GEVENT_BACKEND')
+    backend = config(None, 'GEVENT_BACKEND')
     format_context = 'pprint.pformat'
     threadpool_size = 10
 
@@ -288,14 +325,21 @@ class Hub(greenlet):
                 default = get_ident() == MAIN_THREAD
             loop_class = _import(self.loop_class)
             if loop is None:
-                loop = self.DEFAULT_BACKEND
+                loop = self.backend
             self.loop = loop_class(flags=loop, default=default)
         self._resolver = None
         self._threadpool = None
         self.format_context = _import(self.format_context)
 
     def __repr__(self):
-        result = '<%s at 0x%x %s' % (self.__class__.__name__, id(self), self.loop._format())
+        if self.loop is None:
+            info = 'destroyed'
+        else:
+            try:
+                info = self.loop._format()
+            except Exception, ex:
+                info = str(ex) or repr(ex) or 'error'
+        result = '<%s at 0x%x %s' % (self.__class__.__name__, id(self), info)
         if self._resolver is not None:
             result += ' resolver=%r' % self._resolver
         if self._threadpool is not None:
@@ -303,20 +347,19 @@ class Hub(greenlet):
         return result + '>'
 
     def handle_error(self, context, type, value, tb):
-        self.print_exception(context, type, value, tb)
+        if not issubclass(type, self.NOT_ERROR):
+            self.print_exception(context, type, value, tb)
         if context is None or issubclass(type, self.SYSTEM_ERROR):
             self.handle_system_error(type, value)
 
     def handle_system_error(self, type, value):
         current = getcurrent()
-        if current is self or current is self.parent:
+        if current is self or current is self.parent or self.loop is None:
             self.parent.throw(type, value)
         else:
             self.loop.run_callback(self.parent.throw, type, value)
 
     def print_exception(self, context, type, value, tb):
-        if issubclass(type, self.NOT_ERROR):
-            return
         traceback.print_exception(type, value, tb)
         del tb
         if context is not None:
@@ -337,17 +380,18 @@ class Hub(greenlet):
             exc_clear()
             return greenlet.switch(self)
         finally:
-            core.set_exc_info(exc_type, exc_value)
+            set_exc_info(exc_type, exc_value)
 
     def switch_out(self):
         raise AssertionError('Impossible to call blocking function in the event loop callback')
 
     def wait(self, watcher):
+        waiter = Waiter()
         unique = object()
-        watcher.start(getcurrent().switch, unique)
+        watcher.start(waiter.switch, unique)
         try:
-            result = self.switch()
-            assert result is unique, 'Invalid switch into %s: %r' % (getcurrent(), result)
+            result = waiter.get()
+            assert result is unique, 'Invalid switch into %s: %r (expected %r)' % (getcurrent(), result, unique)
         finally:
             watcher.stop()
 
@@ -416,8 +460,7 @@ class Hub(greenlet):
                 event.unlink(switch)
         return False
 
-    def destroy(self):
-        # this function would be useful after fork / before exec
+    def destroy(self, destroy_loop=None):
         global _threadlocal
         if self._resolver is not None:
             self._resolver.close()
@@ -425,8 +468,11 @@ class Hub(greenlet):
         if self._threadpool is not None:
             self._threadpool.close()
             del self._threadpool
-        self.loop.destroy()
-        del self.loop
+        if destroy_loop is None:
+            destroy_loop = not self.loop.default
+        if destroy_loop:
+            self.loop.destroy()
+        self.loop = None
         if getattr(_threadlocal, 'hub', None) is self:
             del _threadlocal.hub
 

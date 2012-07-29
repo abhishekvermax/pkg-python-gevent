@@ -4,6 +4,85 @@ Changelog
 .. currentmodule:: gevent
 
 
+Release 1.0b3
+-------------
+
+- New gevent.subprocess module
+- New gevent.fileobject module
+- Fixed ThreadPool to discard references of the objects passed to it (function, arguments) asap. Previously they could be stored for unlimited time until the thread gets a new job.
+- Fixed #138: gevent.pool.Pool().imap_unordered hangs with an empty iterator. Thanks to exproxus.
+- Fixed #127: ssl.py could raise TypeError in certain cases. Thanks to Johan Mjones.
+- Fixed socket.makefile() to keep the timeout setting of the socket instance. Thanks to Colin Marc.
+- Added 'copy()' method to queues.
+- The 'nochild' event loop config option is removed. The install_sigchld offer more flexible way of enabling child watchers.
+- core: all watchers except for 'child' now accept new 'priority' keyword argument
+- gevent.Timeout accepts new arguments: 'ref' and 'priority'. The default priority for Timeout is -1.
+- Hub.wait() uses Waiter now instead of raw switching
+- Updated libev to the latest CVS version
+- Made pywsgi to raise an AssertionError if non-zero content-length is passed to start_response(204/304) or if non-empty body is attempted to be written for 304/204 response
+- Removed pywsgi feature to capitalize the passed headers.
+- Fixed util/cythonpp.py to work on python3.2 (#123). Patch by Alexandre Kandalintsev.
+- Added 'closed' readonly property to socket.
+- Added 'ref' read/write property to socket.
+- setup.py now parses CARES_EMBED and LIBEV_EMBED parameters, in addition to EMBED.
+- gevent.reinit() and gevent.fork() only reinit hub if it was created and do not create it themselves
+- Fixed setup.py not to add libev and c-ares to include dirs in non-embed mode. Patch by Ralf Schmitt.
+- Renamed util/make_dist.py to util/makedist.py
+- testrunner.py now saves more information about the system; the stat printing functionality is moved to a separate util/stat.py script.
+
+
+Release 1.0b2
+-------------
+
+Major and backward-incompatible changes:
+
+- Made the threadpool-based resolver the default. To enable the ares-based resolver, set GEVENT_RESOLVER=ares env var.
+- Added support for child watchers (not available on Windows).
+  - Libev loop now reaps all children by default.
+  - If NOCHILD flag is passed to the loop, child watchers and child reaping are disabled.
+- Renamed gevent.coros to gevent.lock. The gevent.coros is still available but deprecated.
+- Added 'stat' watchers to loop.
+- The setup.py now recognizes gevent_embed env var. When set to "no", bundled c-ares and libev are ignored.
+- Added optional 'ref' argument to sleep(). When ref=false, the watchers created by sleep() do not hold gevent.run() from exiting.
+- ThreadPool now calls Hub.handle_error for exceptions in worker threads.
+- ThreadPool got new method: apply_e.
+- Added new extension module gevent._util and moved gevent.core.set_exc_info function there.
+- Added new extension module gevent._semaphore. It contains Semaphore class which is imported by gevent.lock as gevent.lock.Semaphore. Providing Semaphore in extension module ensures that trace function set with settrace will not be called during __exit__. Thanks to Ralf Schmitt.
+- It is now possible to kill or pre-spawn threads in ThreadPool by setting its 'size' property.
+
+core:
+
+- Make sure the default loop cannot be destroyed more than once, thus crashing the process.
+- Make Hub.destroy() method not to destroy the default loop, unless *destroy_loop* is *True*. Non-default loops are still destroyed by default.
+- loop: Removed properties from loop: fdchangecnt, timercnt, asynccnt.
+- loop: Added properties: sigfd, origflags, origflags_int
+- loop: The EVFLAG_NOENV is now always passed to libev. Thus LIBEV_FLAGS env variable is no longer checked. Use GEVENT_BACKEND.
+
+Misc:
+
+- Check that the argument of link() is callable. Raise TypeError when it's not.
+- Fixed TypeError in baseserver when parsing an address.
+- Pool: made add() and discard() usable by external users. Thanks to Danil Eremeev.
+- When specifying a class to import, it is not possible to use format path/package.module.name
+- pywsgi: Made sure format_request() does not fail if 'status' attribute is not set yet
+- pywsgi: Added REMOTE_PORT variable to the environment.
+
+Examples:
+
+- portforwarder.py now shows how to use gevent.run() to implement graceful shutdown of a server.
+- psycopg2_pool.py: Changed execute() to return rowcount.
+- psycopg2_pool.py: Added fetchall() and fetchiter() methods.
+
+Developer utilities:
+
+- When building, CYTHON env variable can be used to specify Cython executable to use.
+- util/make_dist.py now recongizes --fast and --revert options. Previous --rsync option is removed.
+- Added util/winvbox.py which automates building/testing/making binaries on Windows VM.
+- Fixed typos in exception handling code in testrunner.py
+- Fixed patching unittest.runner on Python2.7. This caused the details of test cases run lost.
+- Made testrunner.py kill the whole process group after test is done.
+
+
 Release 1.0b1
 -------------
 
@@ -25,7 +104,6 @@ Release highlights:
   - GEVENT_THREADPOOL allows choosing thread pool class.
 - Added new examples: portforwarder, psycopg2_pool.py, threadpool.py, udp_server.py
 - Fixed non-embedding build. To build against system libev, remove or rename 'libev' directory. To build against system c-ares, remove or rename 'c-ares'. Thanks to Örjan Persson.
-- Added gevent.six module (http://pypi.python.org/pypi/six)
 
 misc:
 - gevent.joinall() method now accepts optional 'count' keyword.
@@ -35,7 +113,7 @@ misc:
 - Hub got a new property: threadpool.
 
 ares.pyx:
-- Fixed issue #104: made ares_host_result pickable issue. Thanks to Shaun Cutts.
+- Fixed issue #104: made ares_host_result pickable. Thanks to Shaun Cutts.
 
 pywsgi:
 - Removed unused deprecated 'wfile' property from WSGIHandler
@@ -68,9 +146,6 @@ monkey:
 - Removed patch_httplib()
 - Fixed issue #112: threading._sleep is not patched. Thanks to David LaBissoniere.
 - Added get_unpatched() function. However, it is slightly broken at the moment.
-
-servers:
-- baseserver.BaseServer has been
 
 backdoor:
 - make 'locals()' not spew out __builtin__.__dict__ in backdoor
@@ -132,7 +207,7 @@ Added handle_system_error() method to Hub (used internally).
 
 Fixed Hub's run() method to never exit. This prevent inappropriate switches into parent greenlet.
 
-Fixed Hub.join() to return False if Hub was already dead.
+Fixed Hub.join() to return True if Hub was already dead.
 
 Added 'event' argument to Hub.join().
 
@@ -170,7 +245,7 @@ Backward-incompatible changes:
 
 - Dropped support for Python 2.4.
 - `Queue(0)` is now equivalent to an unbound queue and raises :exc:`DeprecationError`. Use :class:`gevent.queue.Channel` if you need a channel.
-- Deprecated ability to passing a greenlet instance to :meth:`Greenlet.link`, :meth:`Greenlet.link_value` and :meth:`Greenlet.link_exception`.
+- Deprecated ability to pass a greenlet instance to :meth:`Greenlet.link`, :meth:`Greenlet.link_value` and :meth:`Greenlet.link_exception`.
 - All of :mod:`gevent.core` has been rewritten and the interface is not compatible.
 - :exc:`SystemExit` and :exc:`SystemError` now kill the whole process instead of printing a traceback.
 - Removed deprecated :class:`util.lazy_property` property.
@@ -808,3 +883,4 @@ Besides having less bugs and less code to care about the goals of the fork are:
 * Use the interfaces and conventions from the standard Python library where possible.
 
 .. _eventlet: http://bitbucket.org/denis/eventlet
+

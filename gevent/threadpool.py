@@ -2,13 +2,12 @@
 from __future__ import with_statement
 import sys
 import os
-from gevent.hub import get_hub, sleep
+from gevent.hub import get_hub, getcurrent, sleep, integer_types
 from gevent.event import AsyncResult
 from gevent.greenlet import Greenlet
 from gevent.pool import IMap, IMapUnordered
-from gevent.coros import Semaphore
+from gevent.lock import Semaphore
 from gevent._threading import Lock, Queue, start_new_thread
-from gevent.six import integer_types
 
 
 __all__ = ['ThreadPool',
@@ -22,10 +21,10 @@ class ThreadPool(object):
             hub = get_hub()
         self.hub = hub
         self._maxsize = 0
-        self._init(maxsize)
+        self.manager = None
         self.pid = os.getpid()
         self.fork_watcher = hub.loop.fork(ref=False)
-        self.fork_watcher.start(self._on_fork)
+        self._init(maxsize)
 
     def _set_maxsize(self, maxsize):
         if not isinstance(maxsize, integer_types):
@@ -35,8 +34,7 @@ class ThreadPool(object):
         difference = maxsize - self._maxsize
         self._semaphore.counter += difference
         self._maxsize = maxsize
-        self._remove_threads()
-        self._add_threads()
+        self.adjust()
         # make sure all currently blocking spawn() start unlocking if maxsize increased
         self._semaphore._start_notify()
 
@@ -51,9 +49,32 @@ class ThreadPool(object):
     def __len__(self):
         return self.task_queue.unfinished_tasks
 
-    @property
-    def size(self):
+    def _get_size(self):
         return self._size
+
+    def _set_size(self, size):
+        if size < 0:
+            raise ValueError('Size of the pool cannot be negative: %r' % (size, ))
+        if size > self._maxsize:
+            raise ValueError('Size of the pool cannot be bigger than maxsize: %r > %r' % (size, self._maxsize))
+        if self.manager:
+            self.manager.kill()
+        while self._size < size:
+            self._add_thread()
+        delay = 0.0001
+        while self._size > size:
+            while self._size - size > self.task_queue.unfinished_tasks:
+                self.task_queue.put(None)
+            if getcurrent() is self.hub:
+                break
+            sleep(delay)
+            delay = min(delay * 2, .05)
+        if self._size:
+            self.fork_watcher.start(self._on_fork)
+        else:
+            self.fork_watcher.stop()
+
+    size = property(_get_size, _set_size)
 
     def _init(self, maxsize):
         self._size = 0
@@ -82,25 +103,35 @@ class ThreadPool(object):
             delay = min(delay * 2, .05)
 
     def kill(self):
-        delay = 0.0005
-        while self._size > 0:
-            self._remove_threads(0)
+        self.size = 0
+
+    def _adjust_step(self):
+        # if there is a possibility & necessity for adding a thread, do it
+        while self._size < self._maxsize and self.task_queue.unfinished_tasks > self._size:
+            self._add_thread()
+        # while the number of threads is more than maxsize, kill one
+        # we do not check what's already in task_queue - it could be all Nones
+        while self._size - self._maxsize > self.task_queue.unfinished_tasks:
+            self.task_queue.put(None)
+        if self._size:
+            self.fork_watcher.start(self._on_fork)
+        else:
+            self.fork_watcher.stop()
+
+    def _adjust_wait(self):
+        delay = 0.0001
+        while True:
+            self._adjust_step()
+            if self._size <= self._maxsize:
+                return
             sleep(delay)
             delay = min(delay * 2, .05)
 
-    def _add_threads(self):
-        while self.task_queue.unfinished_tasks > self._size:
-            if self._size >= self.maxsize:
-                break
-            self._add_thread()
-
-    def _remove_threads(self, maxsize=None):
-        if maxsize is None:
-            maxsize = self._maxsize
-        excess = self._size - maxsize
-        if excess > 0:
-            while excess > self.task_queue.qsize():
-                self.task_queue.put(None)
+    def adjust(self):
+        self._adjust_step()
+        if not self.manager and self._size > self._maxsize:
+            # might need to feed more Nones into the pool
+            self.manager = Greenlet.spawn(self._adjust_wait)
 
     def _add_thread(self):
         with self._lock:
@@ -121,23 +152,39 @@ class ThreadPool(object):
         try:
             task_queue = self.task_queue
             result = AsyncResult()
-            tr = ThreadResult(result, hub=self.hub)
-            self._remove_threads()
-            task_queue.put((func, args, kwargs, tr))
-            self._add_threads()
+            thread_result = ThreadResult(result, hub=self.hub)
+            task_queue.put((func, args, kwargs, thread_result))
+            self.adjust()
+            # rawlink() must be the last call
             result.rawlink(lambda *args: self._semaphore.release())
+            # XXX this _semaphore.release() is competing for order with get()
+            # XXX this is not good, just make ThreadResult release the semaphore before doing anything else
         except:
             semaphore.release()
             raise
         return result
 
+    def _decrease_size(self):
+        if sys is None:
+            return
+        _lock = getattr(self, '_lock', None)
+        if _lock is not None:
+            with _lock:
+                self._size -= 1
+
     def _worker(self):
+        need_decrease = True
         try:
             while True:
                 task_queue = self.task_queue
                 task = task_queue.get()
                 try:
                     if task is None:
+                        need_decrease = False
+                        self._decrease_size()
+                        # we want first to decrease size, then decrease unfinished_tasks
+                        # otherwise, _adjust might think there's one more idle thread that
+                        # needs to be killed
                         return
                     func, args, kwargs, result = task
                     try:
@@ -146,22 +193,34 @@ class ThreadPool(object):
                         exc_info = getattr(sys, 'exc_info', None)
                         if exc_info is None:
                             return
-                        result.set_exception(exc_info()[1])
+                        result.handle_error((self, func), exc_info())
                     else:
                         if sys is None:
                             return
                         result.set(value)
+                        del value
+                    finally:
+                        del func, args, kwargs, result, task
                 finally:
                     if sys is None:
                         return
                     task_queue.task_done()
         finally:
-            if sys is None:
-                return
-            _lock = getattr(self, '_lock', None)
-            if _lock is not None:
-                with _lock:
-                    self._size -= 1
+            if need_decrease:
+                self._decrease_size()
+
+    # XXX apply() should re-raise error by default
+    # XXX because that's what builtin apply does
+    # XXX check gevent.pool.Pool.apply and multiprocessing.Pool.apply
+    def apply_e(self, expected_errors, function, args=None, kwargs=None):
+        if args is None:
+            args = ()
+        if kwargs is None:
+            kwargs = {}
+        success, result = self.spawn(wrap_errors, expected_errors, function, args, kwargs).get()
+        if success:
+            return result
+        raise result
 
     def apply(self, func, args=None, kwds=None):
         """Equivalent of the apply() builtin function. It blocks till the result is ready."""
@@ -221,25 +280,48 @@ class ThreadResult(object):
     def __init__(self, receiver, hub=None):
         if hub is None:
             hub = get_hub()
-        self.value = None
-        self.exception = None
         self.receiver = receiver
+        self.hub = hub
+        self.value = None
+        self.context = None
+        self.exc_info = None
         self.async = hub.loop.async()
         self.async.start(self._on_async)
 
     def _on_async(self):
         self.async.stop()
-        if self.receiver is not None:
-            self.receiver(self)
+        try:
+            if self.exc_info is not None:
+                try:
+                    self.hub.handle_error(self.context, *self.exc_info)
+                finally:
+                    self.exc_info = None
+            self.context = None
+            self.async = None
+            self.hub = None
+            if self.receiver is not None:
+                # XXX exception!!!?
+                self.receiver(self)
+        finally:
             self.receiver = None
-
-    def successful(self):
-        return self.exception is None
+            self.value = None
 
     def set(self, value):
         self.value = value
         self.async.send()
 
-    def set_exception(self, value):
-        self.exception = value
+    def handle_error(self, context, exc_info):
+        self.context = context
+        self.exc_info = exc_info
         self.async.send()
+
+    # link protocol:
+    def successful(self):
+        return True
+
+
+def wrap_errors(errors, function, args, kwargs):
+    try:
+        return True, function(*args, **kwargs)
+    except errors:
+        return False, sys.exc_info()[1]

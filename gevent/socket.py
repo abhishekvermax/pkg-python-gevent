@@ -81,7 +81,7 @@ __imports__ = ['error',
 
 import sys
 import time
-from gevent.hub import get_hub, basestring
+from gevent.hub import get_hub, string_types, integer_types
 from gevent.timeout import Timeout
 
 is_windows = sys.platform == 'win32'
@@ -123,7 +123,7 @@ for name in __imports__[:]:
 
 for name in __socket__.__all__:
     value = getattr(__socket__, name)
-    if isinstance(value, (int, long, basestring)):
+    if isinstance(value, integer_types) or isinstance(value, string_types):
         globals()[name] = value
         __imports__.append(name)
 
@@ -215,8 +215,6 @@ class _closedsocket(object):
     __getattr__ = _dummy
 
 
-_delegate_methods = ("recv", "recvfrom", "recv_into", "recvfrom_into", "send", "sendto", 'sendall')
-
 timeout_default = object()
 
 
@@ -272,6 +270,15 @@ class socket(object):
             result += ' timeout=' + str(self.timeout)
         return result
 
+    def _get_ref(self):
+        return self._read_event.ref or self._write_event.ref
+
+    def _set_ref(self, value):
+        self._read_event.ref = value
+        self._write_event.ref = value
+
+    ref = property(_get_ref, _set_ref)
+
     def _wait(self, watcher, timeout_exc=timeout('timed out')):
         """Block the current greenlet until *watcher* has pending events.
 
@@ -282,7 +289,7 @@ class socket(object):
         """
         assert watcher.callback is None, 'This socket is already used by another greenlet: %r' % (watcher.callback, )
         if self.timeout is not None:
-            timeout = Timeout.start_new(self.timeout, timeout_exc)
+            timeout = Timeout.start_new(self.timeout, timeout_exc, ref=False)
         else:
             timeout = None
         try:
@@ -305,15 +312,15 @@ class socket(object):
             self._wait(self._read_event)
         return socket(_sock=client_socket), address
 
-    def close(self, _closedsocket=_closedsocket, _delegate_methods=_delegate_methods,
-              setattr=setattr, cancel_wait_ex=cancel_wait_ex):
+    def close(self, _closedsocket=_closedsocket, cancel_wait_ex=cancel_wait_ex):
         # This function should not reference any globals. See Python issue #808164.
         self.hub.cancel_wait(self._read_event, cancel_wait_ex)
         self.hub.cancel_wait(self._write_event, cancel_wait_ex)
         self._sock = _closedsocket()
-        dummy = self._sock._dummy
-        for method in _delegate_methods:
-            setattr(self, method, dummy)
+
+    @property
+    def closed(self):
+        return isinstance(self._sock, _closedsocket)
 
     def connect(self, address):
         if self.timeout == 0.0:
@@ -362,9 +369,12 @@ class socket(object):
         return socket(_sock=self._sock)
 
     def makefile(self, mode='r', bufsize=-1):
-        # note that this does not inherit timeout either (intentionally, because that's
-        # how the standard socket behaves)
-        return _fileobject(self.dup(), mode, bufsize)
+        # Two things to look out for:
+        # 1) Closing the original socket object should not close the
+        #    socket (hence creating a new instance)
+        # 2) The resulting fileobject must keep the timeout in order
+        #    to be compatible with the stdlib's socket.makefile.
+        return _fileobject(type(self)(_sock=self), mode, bufsize)
 
     def recv(self, *args):
         sock = self._sock  # keeping the reference so that fd is not closed during waiting

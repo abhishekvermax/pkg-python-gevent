@@ -6,9 +6,9 @@ to provide a high-level synchronous API on top of libev event loop.
 See http://www.gevent.org/ for the documentation.
 """
 
-version_info = (1, 0, 0, 'beta', 1)
-__version__ = '1.0b1'
-__changeset__ = '2290:745149cd866d'
+version_info = (1, 0, 0, 'beta', 3)
+__version__ = '1.0b3'
+__changeset__ = '2607:d7ba590e2bbb'
 
 
 __all__ = ['get_hub',
@@ -42,15 +42,11 @@ from gevent.greenlet import Greenlet, joinall, killall
 spawn = Greenlet.spawn
 spawn_later = Greenlet.spawn_later
 from gevent.timeout import Timeout, with_timeout
-from gevent.hub import getcurrent, GreenletExit, spawn_raw, sleep, idle, kill, signal
+from gevent.hub import getcurrent, GreenletExit, spawn_raw, sleep, idle, kill, signal, reinit
 try:
     from gevent.hub import fork
 except ImportError:
     __all__.remove('fork')
-
-
-def reinit():
-    return get_hub().loop.reinit()
 
 
 def run(timeout=None, event=None):

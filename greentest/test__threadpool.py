@@ -1,16 +1,20 @@
-from time import time
+import sys
+from time import time, sleep
 import random
+import weakref
 import greentest
 from gevent.threadpool import ThreadPool
-from gevent import six
 import gevent
+import six
 
 
 class TestCase(greentest.TestCase):
 
     def cleanup(self):
-        if self.pool is not None:
-            self.pool.kill()
+        pool = getattr(self, 'pool', None)
+        if pool is not None:
+            pool.kill()
+            del self.pool
 
 
 class PoolBasicTests(TestCase):
@@ -39,7 +43,7 @@ class PoolBasicTests(TestCase):
         result = pool.apply(lambda a: ('foo', a), (1, ))
         self.assertEqual(result, ('foo', 1))
 
-    def test_init_valuerror(self):
+    def test_init_valueerror(self):
         self.switch_expected = False
         self.assertRaises(ValueError, ThreadPool, -1)
         self.pool = None
@@ -63,12 +67,12 @@ class TimingWrapper(object):
 
 
 def sqr(x, wait=0.0):
-    gevent.sleep(wait)
+    sleep(wait)
     return x * x
 
 
 def sqr_random_sleep(x):
-    gevent.sleep(random.random() * 0.1)
+    sleep(random.random() * 0.1)
     return x * x
 
 
@@ -145,7 +149,7 @@ class TestPool(TestCase):
         self.assertEqual(sorted(it), list(map(sqr, range(10))))
 
     def test_terminate(self):
-        result = self.pool.map_async(gevent.sleep, [0.1] * ((self.size or 10) * 2))
+        result = self.pool.map_async(sleep, [0.1] * ((self.size or 10) * 2))
         gevent.sleep(0.1)
         kill = TimingWrapper(self.pool.kill)
         kill()
@@ -153,7 +157,7 @@ class TestPool(TestCase):
         result.join()
 
     def sleep(self, x):
-        gevent.sleep(float(x) / 10.)
+        sleep(float(x) / 10.)
         return str(x)
 
     def test_imap_unordered_sleep(self):
@@ -176,18 +180,19 @@ class TestPool3(TestPool):
 
 class TestPool10(TestPool):
     size = 10
+    __timeout__ = 5
 
 
 # class TestJoinSleep(greentest.GenericGetTestCase):
-# 
+#
 #     def wait(self, timeout):
 #         pool = ThreadPool(1)
 #         pool.spawn(gevent.sleep, 10)
 #         pool.join(timeout=timeout)
-# 
-# 
+#
+#
 # class TestJoinSleep_raise_error(greentest.GenericWaitTestCase):
-# 
+#
 #     def wait(self, timeout):
 #         pool = ThreadPool(1)
 #         g = pool.spawn(gevent.sleep, 10)
@@ -208,9 +213,9 @@ class TestSpawn(TestCase):
     def test(self):
         self.pool = pool = ThreadPool(1)
         self.assertEqual(len(pool), 0)
-        pool.spawn(gevent.sleep, 0.1)
+        pool.spawn(sleep, 0.1)
         self.assertEqual(len(pool), 1)
-        pool.spawn(gevent.sleep, 0.1)
+        pool.spawn(sleep, 0.1)
         # even though the pool is of size 1, it can contain 2 items
         # since we allow +1 for better throughput
         self.assertEqual(len(pool), 2)
@@ -248,12 +253,97 @@ class TestMaxsize(TestCase):
         self.pool = ThreadPool(0)
         done = []
         gevent.spawn(self.pool.spawn, done.append, 1)
-        gevent.spawn(self.pool.spawn, done.append, 2)
-        gevent.sleep(0.001)
+        gevent.spawn_later(0.0001, self.pool.spawn, done.append, 2)
+        gevent.sleep(0.01)
         self.assertEqual(done, [])
         self.pool.maxsize = 1
+        gevent.sleep(0.01)
+        self.assertEqual(done, [1, 2])
+
+    def test_setzero(self):
+        pool = self.pool = ThreadPool(3)
+        pool.spawn(sleep, 0.001)
+        pool.spawn(sleep, 0.002)
+        pool.spawn(sleep, 0.003)
         gevent.sleep(0.001)
-        self.assertEqual(done, [2, 1])
+        self.assertEqual(pool.size, 3)
+        pool.maxsize = 0
+        gevent.sleep(0.01)
+        self.assertEqual(pool.size, 0)
+
+
+class TestSize(TestCase):
+
+    def test(self):
+        pool = self.pool = ThreadPool(2)
+        self.assertEqual(pool.size, 0)
+        pool.size = 1
+        self.assertEqual(pool.size, 1)
+        pool.size = 2
+        self.assertEqual(pool.size, 2)
+        pool.size = 1
+        self.assertEqual(pool.size, 1)
+        def set_neg():
+            pool.size = -1
+        self.assertRaises(ValueError, set_neg)
+        def set_too_big():
+            pool.size = 3
+        self.assertRaises(ValueError, set_too_big)
+        pool.size = 0
+        self.assertEqual(pool.size, 0)
+        pool.size = 2
+        self.assertEqual(pool.size, 2)
+
+
+class TestRef(TestCase):
+
+    def test(self):
+        pool = self.pool=ThreadPool(2)
+
+        refs = []
+        obj = SomeClass()
+        obj.refs = refs
+        func = obj.func
+        del obj
+
+        with greentest.disabled_gc():
+            # we do this:
+            #     result = func(Object(), kwarg1=Object())
+            # but in a thread pool and see that arguments', result's and func's references are not leaked
+            result = pool.apply(func, (Object(), ), {'kwarg1': Object()})
+            assert isinstance(result, Object), repr(result)
+            gevent.sleep(0)  # XXX should not be needed
+
+            refs.append(weakref.ref(func))
+            del func, result
+            for index, r in enumerate(refs):
+                assert r() is None, (index, r(), sys.getrefcount(r()), refs)
+            assert len(refs) == 4, refs
+
+
+class Object(object):
+    pass
+
+
+class SomeClass(object):
+
+    def func(self, arg1, kwarg1=None):
+        result = Object()
+        self.refs.extend([weakref.ref(x) for x in [arg1, kwarg1, result]])
+        return result
+
+
+def func():
+    pass
+
+
+class TestRefCount(TestCase):
+
+    def test(self):
+        pool = ThreadPool(1)
+        pool.spawn(func)
+        gevent.sleep(0)
+        pool.kill()
 
 
 if __name__ == '__main__':

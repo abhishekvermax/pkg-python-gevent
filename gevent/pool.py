@@ -12,12 +12,11 @@ greenlets in the pool has already reached the limit, until there is a free slot.
 import sys
 from bisect import insort_right
 
-from gevent.hub import GreenletExit, getcurrent, kill as _kill
+from gevent.hub import GreenletExit, getcurrent, kill as _kill, PY3
 from gevent.greenlet import joinall, Greenlet
 from gevent.timeout import Timeout
 from gevent.event import Event
-from gevent.coros import Semaphore, DummySemaphore
-from gevent import six
+from gevent.lock import Semaphore, DummySemaphore
 
 __all__ = ['Group', 'Pool']
 
@@ -34,7 +33,7 @@ class Group(object):
         self.greenlets = set(*args)
         if args:
             for greenlet in args[0]:
-                greenlet.rawlink(self.discard)
+                greenlet.rawlink(self._discard)
         # each item we kill we place in dying, to avoid killing the same greenlet twice
         self.dying = set()
         self._empty_event = Event()
@@ -58,24 +57,32 @@ class Group(object):
         except AttributeError:
             pass  # non-Greenlet greenlet, like MAIN
         else:
-            rawlink(self.discard)
+            rawlink(self._discard)
         self.greenlets.add(greenlet)
         self._empty_event.clear()
 
-    def discard(self, greenlet):
+    def _discard(self, greenlet):
         self.greenlets.discard(greenlet)
         self.dying.discard(greenlet)
         if not self.greenlets:
             self._empty_event.set()
+
+    def discard(self, greenlet):
+        self._discard(greenlet)
+        try:
+            unlink = greenlet.unlink
+        except AttributeError:
+            pass  # non-Greenlet greenlet, like MAIN
+        else:
+            unlink(self._discard)
 
     def start(self, greenlet):
         self.add(greenlet)
         greenlet.start()
 
     def spawn(self, *args, **kwargs):
-        add = self.add
-        greenlet = self.greenlet_class.spawn(*args, **kwargs)
-        add(greenlet)
+        greenlet = self.greenlet_class(*args, **kwargs)
+        self.start(greenlet)
         return greenlet
 
 #     def close(self):
@@ -214,16 +221,20 @@ class IMapUnordered(Greenlet):
             raise value.exc
         return value
 
-    if six.PY3:
+    if PY3:
         __next__ = next
         del next
 
     def _run(self):
         try:
             func = self.func
+            empty = True
             for item in self.iterable:
                 self.count += 1
                 self.spawn(func, item).rawlink(self._on_result)
+                empty = False
+            if empty:
+                self.queue.put(Failure(StopIteration))
         finally:
             self.__dict__.pop('spawn', None)
             self.__dict__.pop('func', None)
@@ -275,12 +286,13 @@ class IMap(Greenlet):
             if value is not _SKIP:
                 return value
 
-    if six.PY3:
+    if PY3:
         __next__ = next
         del next
 
     def _run(self):
         try:
+            empty = True
             func = self.func
             for item in self.iterable:
                 self.count += 1
@@ -288,6 +300,10 @@ class IMap(Greenlet):
                 g.rawlink(self._on_result)
                 self.maxindex += 1
                 g.index = self.maxindex
+                empty = False
+            if empty:
+                self.maxindex += 1
+                self.queue.put((self.maxindex, Failure(StopIteration)))
         finally:
             self.__dict__.pop('spawn', None)
             self.__dict__.pop('func', None)
@@ -341,27 +357,16 @@ class Pool(Group):
             return 1
         return max(0, self.size - len(self))
 
-    def start(self, greenlet):
+    def add(self, greenlet):
         self._semaphore.acquire()
         try:
-            self.add(greenlet)
+            Group.add(self, greenlet)
         except:
             self._semaphore.release()
             raise
-        greenlet.start()
 
-    def spawn(self, *args, **kwargs):
-        self._semaphore.acquire()
-        try:
-            greenlet = self.greenlet_class.spawn(*args, **kwargs)
-            self.add(greenlet)
-        except:
-            self._semaphore.release()
-            raise
-        return greenlet
-
-    def discard(self, greenlet):
-        Group.discard(self, greenlet)
+    def _discard(self, greenlet):
+        Group._discard(self, greenlet)
         self._semaphore.release()
 
 

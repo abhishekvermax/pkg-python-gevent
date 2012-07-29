@@ -21,8 +21,31 @@ ext_errors = (CCompilerError, DistutilsExecError, DistutilsPlatformError, IOErro
 __version__ = re.search("__version__\s*=\s*'(.*)'", open('gevent/__init__.py').read(), re.M).group(1)
 assert __version__
 
-libev_embed = os.path.exists('libev')
-ares_embed = os.path.exists('c-ares')
+
+def parse_environ(key):
+    value = os.environ.get(key)
+    if not value:
+        return
+    value = value.lower().strip()
+    if value in ('1', 'true', 'on', 'yes'):
+        return True
+    elif value in ('0', 'false', 'off', 'no'):
+        return False
+    raise ValueError('Environment variable %r has invalid value %r. Please set it to 1, 0 or an empty string' % (key, value))
+
+
+def get_config_value(key, defkey, path):
+    value = parse_environ(key)
+    if value is None:
+        value = parse_environ(defkey)
+    if value is not None:
+        return value
+    return os.path.exists(path)
+
+
+LIBEV_EMBED = get_config_value('LIBEV_EMBED', 'EMBED', 'libev')
+CARES_EMBED = get_config_value('CARES_EMBED', 'EMBED', 'c-ares')
+
 define_macros = []
 libraries = []
 libev_configure_command = ["/bin/sh", abspath('libev/configure'), '> configure-output.txt']
@@ -44,21 +67,27 @@ def expand(*lst):
 
 CORE = Extension(name='gevent.core',
                  sources=['gevent/gevent.core.c'],
-                 include_dirs=['libev'],
+                 include_dirs=['libev'] if LIBEV_EMBED else [],
                  libraries=libraries,
                  define_macros=define_macros,
-                 depends=expand('gevent/callbacks.*', 'gevent/libev*.h', 'libev/*.*'))
+                 depends=expand('gevent/callbacks.*', 'gevent/stathelper.c', 'gevent/libev*.h', 'libev/*.*'))
+# QQQ libev can also use -lm, however it seems to be added implicitly
 
 ARES = Extension(name='gevent.ares',
                  sources=['gevent/gevent.ares.c'],
-                 include_dirs=['c-ares'],
+                 include_dirs=['c-ares'] if CARES_EMBED else [],
                  libraries=libraries,
                  define_macros=define_macros,
                  depends=expand('gevent/dnshelper.c', 'gevent/cares_*.*'))
 ARES.optional = True
 
 
-ext_modules = [CORE, ARES]
+ext_modules = [CORE,
+               ARES,
+               Extension(name="gevent._semaphore",
+                         sources=["gevent/gevent._semaphore.c"]),
+               Extension(name="gevent._util",
+                         sources=["gevent/gevent._util.c"])]
 
 
 def make_universal_header(filename, *defines):
@@ -82,7 +111,7 @@ def make_universal_header(filename, *defines):
 
 def _system(cmd):
     cmd = ' '.join(cmd)
-    sys.stderr.write('Running %r in %s\n' % (cmd, os.getcwd()))
+    sys.stdout.write('Running %r in %s\n' % (cmd, os.getcwd()))
     return os.system(cmd)
 
 
@@ -98,11 +127,10 @@ def configure_libev(bext, ext):
         os.makedirs(bdir)
 
     cwd = os.getcwd()
+    os.chdir(bdir)
     try:
-        os.chdir(bdir)
         if os.path.exists('config.h'):
             return
-
         rc = _system(libev_configure_command)
         if rc == 0 and sys.platform == 'darwin':
             make_universal_header('config.h', 'SIZEOF_LONG', 'SIZEOF_SIZE_T', 'SIZEOF_TIME_T')
@@ -122,11 +150,10 @@ def configure_ares(bext, ext):
         return
 
     cwd = os.getcwd()
+    os.chdir(bdir)
     try:
-        os.chdir(bdir)
         if os.path.exists('ares_config.h') and os.path.exists('ares_build.h'):
             return
-
         rc = _system(ares_configure_command)
         if rc == 0 and sys.platform == 'darwin':
             make_universal_header('ares_build.h', 'CARES_SIZEOF_LONG')
@@ -135,15 +162,13 @@ def configure_ares(bext, ext):
         os.chdir(cwd)
 
 
-if libev_embed:
+if LIBEV_EMBED:
     CORE.define_macros += [('LIBEV_EMBED', '1'),
                            ('EV_COMMON', ''),  # we don't use void* data
                            # libev watchers that we don't use currently:
-                           ('EV_STAT_ENABLE', '0'),
                            ('EV_CHECK_ENABLE', '0'),
                            ('EV_CLEANUP_ENABLE', '0'),
                            ('EV_EMBED_ENABLE', '0'),
-                           ('EV_CHILD_ENABLE', '0'),
                            ("EV_PERIODIC_ENABLE", '0')]
     CORE.configure = configure_libev
     if sys.platform == "darwin":
@@ -152,7 +177,7 @@ else:
     CORE.libraries.append('ev')
 
 
-if ares_embed:
+if CARES_EMBED:
     ARES.sources += expand('c-ares/*.c')
     ARES.configure = configure_ares
     if sys.platform == 'win32':
@@ -162,7 +187,7 @@ if ares_embed:
         ARES.define_macros += [('HAVE_CONFIG_H', '')]
         if sys.platform != 'darwin':
             ARES.libraries += ['rt']
-    ARES.define_macros += [('CARES_EMBED', '')]
+    ARES.define_macros += [('CARES_EMBED', '1')]
 else:
     ARES.libraries.append('cares')
     ARES.define_macros += [('HAVE_NETDB_H', '')]
@@ -227,10 +252,10 @@ class my_build_ext(build_ext):
                     except OSError:
                         pass
                     if hasattr(os, 'symlink'):
-                        sys.stderr.write('Linking %s to %s\n' % (path_to_build_core_so, path_to_core_so))
+                        sys.stdout.write('Linking %s to %s\n' % (path_to_build_core_so, path_to_core_so))
                         os.symlink(path_to_build_core_so, path_to_core_so)
                     else:
-                        sys.stderr.write('Copying %s to %s\n' % (path_to_build_core_so, path_to_core_so))
+                        sys.stdout.write('Copying %s to %s\n' % (path_to_build_core_so, path_to_core_so))
                         shutil.copyfile(path_to_build_core_so, path_to_core_so)
         except Exception:
             traceback.print_exc()

@@ -1,9 +1,9 @@
 # testing gevent's Event, Lock, RLock, Semaphore, BoundedSemaphore with standard test_threading
 from __future__ import with_statement
 
-setup = '''from gevent import monkey; monkey.patch_all()
+setup_ = '''from gevent import monkey; monkey.patch_all()
 from gevent.event import Event
-from gevent.coros import RLock, Semaphore, BoundedSemaphore
+from gevent.lock import RLock, Semaphore, BoundedSemaphore
 from gevent.thread import allocate_lock as Lock
 import threading
 threading.Event = Event
@@ -23,11 +23,11 @@ if not hasattr(threading._Condition, 'notify_all'):
     threading._Condition.notify_all = threading._Condition.notifyAll
 '''
 
-exec setup
+exec setup_
 
-setup_3 = '\n'.join('            %s' % line for line in setup.split('\n'))
-setup_4 = '\n'.join('                %s' % line for line in setup.split('\n'))
-setup_5 = '\n'.join('                    %s' % line for line in setup.split('\n'))
+setup_3 = '\n'.join('            %s' % line for line in setup_.split('\n'))
+setup_4 = '\n'.join('                %s' % line for line in setup_.split('\n'))
+setup_5 = '\n'.join('                    %s' % line for line in setup_.split('\n'))
 
 
 import test.test_support
@@ -44,15 +44,21 @@ import weakref
 import lock_tests
 
 # A trivial mutable counter.
+
+
 class Counter(object):
     def __init__(self):
         self.value = 0
+
     def inc(self):
         self.value += 1
+
     def dec(self):
         self.value -= 1
+
     def get(self):
         return self.value
+
 
 class TestThread(threading.Thread):
     def __init__(self, name, testcase, sema, mutex, nrunning):
@@ -86,6 +92,7 @@ class TestThread(threading.Thread):
                     print '%s is finished. %d tasks are running' % (
                         self.name, self.nrunning.get())
 
+
 class ThreadTests(unittest.TestCase):
 
     # Create a bunch of threads, let each do some work, wait until all are
@@ -103,7 +110,7 @@ class ThreadTests(unittest.TestCase):
         threads = []
 
         for i in range(NUMTASKS):
-            t = TestThread("<thread %d>"%i, self, sema, mutex, numrunning)
+            t = TestThread("<thread %d>" % i, self, sema, mutex, numrunning)
             threads.append(t)
             if hasattr(t, 'ident'):
                 self.failUnlessEqual(t.ident, None)
@@ -127,6 +134,7 @@ class ThreadTests(unittest.TestCase):
         def test_ident_of_no_threading_threads(self):
             # The ident still must work for the main thread and dummy threads.
             self.assertFalse(threading.currentThread().ident is None)
+
             def f():
                 ident.append(threading.currentThread().ident)
                 done.set()
@@ -220,7 +228,7 @@ class ThreadTests(unittest.TestCase):
                     worker_saw_exception.set()
 
         t = Worker()
-        t.daemon = True # so if this fails, we don't hang Python at shutdown
+        t.daemon = True  # so if this fails, we don't hang Python at shutdown
         t.start()
         if verbose:
             print "    started worker thread"
@@ -241,7 +249,7 @@ class ThreadTests(unittest.TestCase):
         if verbose:
             print "    attempting to raise asynch exception in worker"
         result = set_async_exc(ctypes.c_long(t.id), exception)
-        self.assertEqual(result, 1) # one thread state modified
+        self.assertEqual(result, 1)  # one thread state modified
         if verbose:
             print "    waiting for worker to say it caught the exception"
         worker_saw_exception.wait(timeout=10)
@@ -309,35 +317,6 @@ class ThreadTests(unittest.TestCase):
                 """ % setup_4])
             self.assertEqual(rc, 42)
 
-    def test_finalize_with_trace(self):
-        # Issue1733757
-        # Avoid a deadlock when sys.settrace steps into threading._shutdown
-        import subprocess
-        rc = subprocess.call([sys.executable, "-c", """if 1:
-%s
-            import sys, threading
-
-            # A deadlock-killer, to prevent the
-            # testsuite to hang forever
-            def killer():
-                import os, time
-                time.sleep(2)
-                print 'program blocked; aborting'
-                os._exit(2)
-            t = threading.Thread(target=killer)
-            t.daemon = True
-            t.start()
-
-            # This is the trace function
-            def func(frame, event, arg):
-                threading.current_thread()
-                return func
-
-            sys.settrace(func)
-            """ % setup_3])
-        self.failIf(rc == 2, "interpreted was blocked")
-        self.failUnless(rc == 0, "Unexpected error")
-
     if sys.version_info[:2] > (2, 5):
         def test_join_nondaemon_on_shutdown(self):
             # Issue 1722344
@@ -393,7 +372,7 @@ class ThreadTests(unittest.TestCase):
                     self.should_raise = should_raise
                     self.thread = threading.Thread(target=self._run,
                                                    args=(self,),
-                                                   kwargs={'yet_another':self})
+                                                   kwargs={'yet_another': self})
                     self.thread.start()
 
                 def _run(self, other_ref, yet_another):
@@ -449,7 +428,6 @@ class ThreadJoinOnShutdown(unittest.TestCase):
             print 'end of main'
             """
         self._run_and_join(script)
-
 
     def test_2_join_in_forked_process(self):
         # Like the test above, but from a forked interpreter
@@ -512,7 +490,7 @@ class ThreadingExceptionTests(unittest.TestCase):
 
     def test_joining_current_thread(self):
         current_thread = threading.current_thread()
-        self.assertRaises(RuntimeError, current_thread.join);
+        self.assertRaises(RuntimeError, current_thread.join)
 
     def test_joining_inactive_thread(self):
         thread = threading.Thread()
@@ -527,27 +505,33 @@ class ThreadingExceptionTests(unittest.TestCase):
 class LockTests(lock_tests.LockTests):
     locktype = staticmethod(threading.Lock)
 
+
 class RLockTests(lock_tests.RLockTests):
     locktype = staticmethod(threading.RLock)
 
+
 class EventTests(lock_tests.EventTests):
     eventtype = staticmethod(threading.Event)
+
 
 class ConditionAsRLockTests(lock_tests.RLockTests):
     # An Condition uses an RLock by default and exports its API.
     locktype = staticmethod(threading.Condition)
 
+
 class ConditionTests(lock_tests.ConditionTests):
     condtype = staticmethod(threading.Condition)
 
+
 class SemaphoreTests(lock_tests.SemaphoreTests):
     semtype = staticmethod(threading.Semaphore)
+
 
 class BoundedSemaphoreTests(lock_tests.BoundedSemaphoreTests):
     semtype = staticmethod(threading.BoundedSemaphore)
 
 
-def test_main():
+def main():
     test.test_support.run_unittest(LockTests, RLockTests, EventTests,
                                    ConditionAsRLockTests, ConditionTests,
                                    SemaphoreTests, BoundedSemaphoreTests,
@@ -557,4 +541,4 @@ def test_main():
                                    )
 
 if __name__ == "__main__":
-    test_main()
+    main()
