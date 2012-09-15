@@ -5,10 +5,14 @@ Uploaders: Andreas Schuldei <andreas@debian.org>
 Build-Depends: debhelper (>= 7.0.50~),
                python-all-dev,
                python-all-dbg,
+               python3-all-dev,
+               python3-all-dbg,
                libev-dev,
                libc-ares-dev,
                python-greenlet,
                python-sphinx (>= 0.6)
+X-Python-Version: >= 2.6
+X-Python3-Version: >= 3.0
 Standards-Version: 3.9.1
 Section: python
 Homepage: http://www.gevent.org/
@@ -41,7 +45,6 @@ Description: gevent is a coroutine-based Python networking library - documentati
  This is the documentation for gevent.
 
 Package: python-gevent
-Section: python
 Architecture: any
 Depends: python-greenlet,
          ${misc:Depends},
@@ -51,3 +54,29 @@ Suggests: python-gevent-doc, python-gevent-dbg, python-openssl
 Description: gevent is a coroutine-based Python networking library
  gevent uses greenlet to provide a high-level synchronous API on top of the
  libev event loop.
+
+Package: python3-gevent-dbg
+Section: debug
+Architecture: any
+Depends: python3-gevent (= ${binary:Version}),
+         ${misc:Depends},
+         ${shlibs:Depends}
+Recommends: python-dbg
+Description: gevent is a coroutine-based Python networking library - debugging symbols
+ gevent uses greenlet to provide a high-level synchronous API on top of the
+ libev event loop.
+ .
+ This is the debugging symbols for gevent.
+
+Package: python3-gevent
+Architecture: any
+Depends: python3-greenlet,
+         ${misc:Depends},
+         ${shlibs:Depends},
+         ${python3:Depends}
+Suggests: python-gevent-doc, python3-gevent-dbg
+Description: gevent is a coroutine-based Python networking library
+ gevent uses greenlet to provide a high-level synchronous API on top of the
+ libev event loop.
+ .
+ This is the Python 3 package for gevent.
