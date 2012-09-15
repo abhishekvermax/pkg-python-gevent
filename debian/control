@@ -2,16 +2,23 @@ Source: python-gevent
 Priority: extra
 Maintainer: Örjan Persson <orange@fobie.net>
 Uploaders: Andreas Schuldei <andreas@debian.org>
-Build-Depends: debhelper (>= 7.0.50), python-support, python-all-dev, python-all-dbg,
- libev-dev, libc-ares-dev, python-greenlet, python-sphinx (>= 0.6)
-Standards-Version: 3.9.2
+Build-Depends: debhelper (>= 7.0.50~),
+               python-all-dev,
+               python-all-dbg,
+               libev-dev,
+               libc-ares-dev,
+               python-greenlet,
+               python-sphinx (>= 0.6)
+Standards-Version: 3.9.1
 Section: python
 Homepage: http://www.gevent.org/
 
 Package: python-gevent-dbg
 Section: debug
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, python-gevent (= ${binary:Version})
+Depends: python-gevent (= ${binary:Version}),
+         ${misc:Depends},
+         ${shlibs:Depends}
 Recommends: python-dbg
 Description: gevent is a coroutine-based Python networking library - debugging symbols
  gevent uses greenlet to provide a high-level synchronous API on top of the
@@ -22,7 +29,10 @@ Description: gevent is a coroutine-based Python networking library - debugging s
 Package: python-gevent-doc
 Section: doc
 Architecture: all
-Depends: ${shlibs:Depends}, ${misc:Depends}, libjs-jquery, libjs-underscore
+Depends: libjs-jquery,
+         libjs-underscore,
+         ${misc:Depends},
+         ${shlibs:Depends}
 Priority: optional
 Description: gevent is a coroutine-based Python networking library - documentation
  gevent uses greenlet to provide a high-level synchronous API on top of the
@@ -33,7 +43,10 @@ Description: gevent is a coroutine-based Python networking library - documentati
 Package: python-gevent
 Section: python
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, ${python:Depends}, python-greenlet
+Depends: python-greenlet,
+         ${misc:Depends},
+         ${shlibs:Depends},
+         ${python:Depends}
 Suggests: python-gevent-doc, python-gevent-dbg, python-openssl
 Description: gevent is a coroutine-based Python networking library
  gevent uses greenlet to provide a high-level synchronous API on top of the
