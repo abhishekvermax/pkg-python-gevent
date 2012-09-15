@@ -1,8 +1,10 @@
 # mostly tests from test_subprocess.py that used to have problems
 import sys
 import os
+import errno
 import greentest
 from gevent import subprocess
+import time
 
 
 if subprocess.mswindows:
@@ -110,12 +112,23 @@ class Test(greentest.TestCase):
         # see issue #134
         r, w = os.pipe()
         p = subprocess.Popen(['grep', 'text'], stdin=subprocess.FileObject(r))
-        os.close(w)
         try:
-            self.assertEqual(p.wait(timeout=0.1), None)
+            os.close(w)
+            time.sleep(0.1)
+            self.assertEqual(p.poll(), None)
         finally:
             if p.poll() is None:
-                p.send_signal(9)
+                p.kill()
+
+    def test_issue148(self):
+        for i in range(7):
+            try:
+                p1 = subprocess.Popen('this_name_must_not_exist')
+            except OSError as ex:
+                if ex.errno != errno.ENOENT:
+                    raise
+            else:
+                raise AssertionError('must fail with ENOENT')
 
 
 if __name__ == '__main__':

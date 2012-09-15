@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 import sys
 import os
 import errno
@@ -10,7 +11,7 @@ from gevent.hub import get_hub
 from gevent.fileobject import FileObject
 from gevent.greenlet import Greenlet, joinall
 spawn = Greenlet.spawn
-__subprocess__ = __import__('subprocess')
+import subprocess as __subprocess__
 
 
 # Standard functions and classes that this module re-implements in a gevent-aware way.
@@ -464,10 +465,10 @@ class Popen(object):
                     self.returncode = GetExitCodeProcess(self._handle)
             return self.returncode
 
-        def wait(self):
+        def wait(self, timeout=None):
             """Wait for child process to terminate.  Returns returncode
             attribute."""
-            # XXX support timeout argument
+            # XXX timeout is ignored now
             # XXX do not launch more than one WaitForSingleObject
             # XXX add 'event' attribute
             if self.returncode is None:

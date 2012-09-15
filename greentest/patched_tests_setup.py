@@ -4,11 +4,11 @@ import re
 # By default, test cases are expected to switch and emit warnings if there was none
 # If a test is found in this list, it's expected not to switch.
 no_switch_tests = '''test_patched_select.SelectTestCase.test_error_conditions
-test_patched_ftplib.TestFTPClass.test_all_errors
-test_patched_ftplib.TestFTPClass.test_getwelcome
-test_patched_ftplib.TestFTPClass.test_sanitize
-test_patched_ftplib.TestFTPClass.test_set_pasv
-test_patched_ftplib.TestIPv6Environment.test_af
+test_patched_ftplib.*.test_all_errors
+test_patched_ftplib.*.test_getwelcome
+test_patched_ftplib.*.test_sanitize
+test_patched_ftplib.*.test_set_pasv
+#test_patched_ftplib.TestIPv6Environment.test_af
 test_patched_socket.TestExceptions.testExceptionTree
 test_patched_socket.Urllib2FileobjectTest.testClose
 test_patched_socket.TestLinuxAbstractNamespace.testLinuxAbstractNamespace
@@ -21,6 +21,8 @@ test_patched_httplib.BasicTest.*
 test_patched_httplib.HTTPSTimeoutTest.test_attributes
 test_patched_httplib.HeaderTests.*
 test_patched_httplib.OfflineTest.*
+test_patched_httplib.HTTPSTimeoutTest.test_host_port
+test_patched_httplib.SourceAddressTest.testHTTPSConnectionSourceAddress
 test_patched_select.SelectTestCase.test_error_conditions
 test_patched_smtplib.NonConnectingTests.*
 test_patched_urllib2net.OtherNetworkTests.*
@@ -109,6 +111,10 @@ disabled_tests = \
     # expects select.select() to raise select.error(EINTR, 'interrupted system call')
     # gevent.select.select() does not get interrupted (unless signal handler raises an error)
     # maybe it should?
+
+    , 'test_signal.SiginterruptTest.test_without_siginterrupt'
+    , 'test_signal.SiginterruptTest.test_siginterrupt_on'
+    # these rely on os.read raising EINTR which never happens with gevent.os.read
 
     , 'test_subprocess.test_leak_fast_process_del_killed'
     , 'test_subprocess.test_zombie_fast_process_del'

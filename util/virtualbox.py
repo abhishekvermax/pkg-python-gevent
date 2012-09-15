@@ -138,7 +138,6 @@ class VirtualBox(object):
         self.username = username
         self.password = password
         self.type = type
-        self.mkdir_timeout = 15
 
     def start(self):
         self.initial_state = start(self.name, self.type)
@@ -147,6 +146,8 @@ class VirtualBox(object):
     def stop(self):
         if self.initial_state == 'paused':
             self.pause()
+        elif self.initial_state == 'saved':
+            self.restore()
         elif self.initial_state != 'running':
             self.poweroff()
 
@@ -159,10 +160,8 @@ class VirtualBox(object):
     def restore(self):
         return vbox_restore(self.name)
 
-    def mkdir(self, path, timeout=None):
-        if timeout is None:
-            timeout = self.mkdir_timeout
-        return vbox_mkdir(self.name, path, username=self.username, password=self.password, timeout=timeout)
+    def mkdir(self, path, **kwargs):
+        return vbox_mkdir(self.name, path, username=self.username, password=self.password, **kwargs)
 
     def copyto(self, source, dest):
         return vbox_copyto(self.name, source, dest, username=self.username, password=self.password)
@@ -184,7 +183,7 @@ def start(name, type=None):
         vbox_startvm(name, type)
     else:
         print 'Weird state: %r' % state
-        vbox_poweroff(name)
+        vbox_poweroff(name, fail=False)
         vbox_startvm(name, type)
     return state
 
@@ -205,8 +204,8 @@ def vbox_pause(name):
     system('VBoxManage controlvm %s pause' % name)
 
 
-def vbox_poweroff(name):
-    system('VBoxManage controlvm %s poweroff' % name)
+def vbox_poweroff(name, **kwargs):
+    system('VBoxManage controlvm %s poweroff' % name, **kwargs)
 
 
 def vbox_restorecurrent(name):

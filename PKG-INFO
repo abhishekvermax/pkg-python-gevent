@@ -1,6 +1,6 @@
-Metadata-Version: 1.1
+Metadata-Version: 1.0
 Name: gevent
-Version: 1.0b3
+Version: 1.0b4
 Summary: Coroutine-based network library
 Home-page: http://www.gevent.org/
 Author: Denis Bilenko
