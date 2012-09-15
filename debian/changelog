@@ -1,3 +1,10 @@
+python-gevent (1.0~b4-1) experimental; urgency=low
+
+  * New upstream version.
+  * Switched to dh_python2.
+
+ -- Örjan Persson <orange@fobie.net>  Fri, 14 Sep 2012 23:05:01 -0700
+
 python-gevent (1.0~b3-1) experimental; urgency=low
 
   * New upstream version.
