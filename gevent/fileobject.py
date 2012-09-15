@@ -1,7 +1,9 @@
+from __future__ import absolute_import
 import sys
 import os
 from gevent.hub import get_hub
 from gevent.socket import EBADF
+from gevent.os import _read, _write, ignored_errors
 
 
 try:
@@ -21,8 +23,7 @@ if fcntl is None:
 
 else:
 
-    from gevent.socket import _fileobject, EAGAIN, _get_memory
-    from errno import EINTR
+    from gevent.socket import _fileobject, _get_memory
     cancel_wait_ex = IOError(EBADF, 'File descriptor was closed in another greenlet')
 
     try:
@@ -95,31 +96,29 @@ else:
             fileno = self.fileno()
             bytes_total = len(data)
             bytes_written = 0
-            while bytes_written < bytes_total:
+            while True:
                 try:
-                    bytes_written += os.write(fileno, _get_memory(data, bytes_written))
+                    bytes_written += _write(fileno, _get_memory(data, bytes_written))
                 except (IOError, OSError):
                     code = sys.exc_info()[1].args[0]
-                    if code == EINTR:
-                        sys.exc_clear()
-                        continue
-                    elif code != EAGAIN:
+                    if code not in ignored_errors:
                         raise
                     sys.exc_clear()
+                if bytes_written >= bytes_total:
+                    return
                 self.hub.wait(self._write_event)
 
         def recv(self, size):
             while True:
                 try:
-                    data = os.read(self.fileno(), size)
+                    data = _read(self.fileno(), size)
                 except (IOError, OSError):
                     code = sys.exc_info()[1].args[0]
-                    if code == EBADF:
+                    if code in ignored_errors:
+                        pass
+                    elif code == EBADF:
                         return ''
-                    elif code == EINTR:
-                        sys.exc_clear()
-                        continue
-                    elif code != EAGAIN:
+                    else:
                         raise
                     sys.exc_clear()
                 else:
