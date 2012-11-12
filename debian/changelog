@@ -1,3 +1,9 @@
+python-gevent (1.0~rc1-1) experimental; urgency=low
+
+  * New upstream version.
+
+ -- Örjan Persson <orange@fobie.net>  Mon, 12 Nov 2012 12:57:30 -0800
+
 python-gevent (1.0~b4-1) experimental; urgency=low
 
   * New upstream version.
