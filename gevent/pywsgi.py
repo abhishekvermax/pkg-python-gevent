@@ -345,11 +345,60 @@ class WSGIHandler(object):
                         self.response_use_chunked = True
                         self.response_headers.append(('Transfer-Encoding', 'chunked'))
 
+    def _sendall(self, data):
+        try:
+            self.socket.sendall(data)
+        except socket.error, ex:
+            self.status = 'socket error: %s' % ex
+            if self.code > 0:
+                self.code = -self.code
+            raise
+        self.response_length += len(data)
+
+    def _write(self, data):
+        if not data:
+            return
+        if self.response_use_chunked:
+            ## Write the chunked encoding
+            data = "%x\r\n%s\r\n" % (len(data), data)
+        self._sendall(data)
+
     def write(self, data):
-        towrite = []
-        if not self.status:
-            raise AssertionError("The application did not call start_response()")
-        if not self.headers_sent:
+        if self.code in (304, 204) and data:
+            raise AssertionError('The %s response must have no body' % self.code)
+
+        if self.headers_sent:
+            self._write(data)
+        else:
+            if not self.status:
+                raise AssertionError("The application did not call start_response()")
+            self._write_with_headers(data)
+
+    if sys.version_info[:2] >= (2, 6):
+
+        def _write_with_headers(self, data):
+            towrite = bytearray()
+            self.headers_sent = True
+            self.finalize_headers()
+
+            towrite.extend('%s %s\r\n' % (self.request_version, self.status))
+            for header in self.response_headers:
+                towrite.extend('%s: %s\r\n' % header)
+
+            towrite.extend('\r\n')
+            if data:
+                if self.response_use_chunked:
+                    ## Write the chunked encoding
+                    towrite.extend("%x\r\n%s\r\n" % (len(data), data))
+                else:
+                    towrite.extend(data)
+            self._sendall(towrite)
+
+    else:
+        # Python 2.5 does not have bytearray
+
+        def _write_with_headers(self, data):
+            towrite = []
             self.headers_sent = True
             self.finalize_headers()
 
@@ -358,26 +407,13 @@ class WSGIHandler(object):
                 towrite.append('%s: %s\r\n' % header)
 
             towrite.append('\r\n')
-
-        if data:
-            if self.code in (304, 204):
-                raise AssertionError('The %s response must have no body' % self.code)
-
-            if self.response_use_chunked:
-                ## Write the chunked encoding
-                towrite.append("%x\r\n%s\r\n" % (len(data), data))
-            else:
-                towrite.append(data)
-
-        msg = ''.join(towrite)
-        try:
-            self.socket.sendall(msg)
-        except socket.error, ex:
-            self.status = 'socket error: %s' % ex
-            if self.code > 0:
-                self.code = -self.code
-            raise
-        self.response_length += len(msg)
+            if data:
+                if self.response_use_chunked:
+                    ## Write the chunked encoding
+                    towrite.append("%x\r\n%s\r\n" % (len(data), data))
+                else:
+                    towrite.append(data)
+            self._sendall(''.join(towrite))
 
     def start_response(self, status, headers, exc_info=None):
         if exc_info:
@@ -487,6 +523,23 @@ class WSGIHandler(object):
             self.start_response(_INTERNAL_ERROR_STATUS, _INTERNAL_ERROR_HEADERS)
             self.write(_INTERNAL_ERROR_BODY)
 
+    def _headers(self):
+        key = None
+        value = None
+        for header in self.headers.headers:
+            if key is not None and header[:1] in " \t":
+                value += header
+                continue
+
+            if key not in (None, 'CONTENT_TYPE', 'CONTENT_LENGTH'):
+                yield 'HTTP_' + key, value.strip()
+
+            key, value = header.split(':', 1)
+            key = key.replace('-', '_').upper()
+
+        if key not in (None, 'CONTENT_TYPE', 'CONTENT_LENGTH'):
+            yield 'HTTP_' + key, value.strip()
+
     def get_environ(self):
         env = self.server.get_environ()
         env['REQUEST_METHOD'] = self.command
@@ -512,19 +565,14 @@ class WSGIHandler(object):
             env['REMOTE_ADDR'] = str(client_address[0])
             env['REMOTE_PORT'] = str(client_address[1])
 
-        for header in self.headers.headers:
-            key, value = header.split(':', 1)
-            key = key.replace('-', '_').upper()
-            if key not in ('CONTENT_TYPE', 'CONTENT_LENGTH'):
-                value = value.strip()
-                key = 'HTTP_' + key
-                if key in env:
-                    if 'COOKIE' in key:
-                        env[key] += '; ' + value
-                    else:
-                        env[key] += ',' + value
+        for key, value in self._headers():
+            if key in env:
+                if 'COOKIE' in key:
+                    env[key] += '; ' + value
                 else:
-                    env[key] = value
+                    env[key] += ',' + value
+            else:
+                env[key] = value
 
         if env.get('HTTP_EXPECT') == '100-continue':
             socket = self.socket

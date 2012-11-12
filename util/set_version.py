@@ -12,22 +12,22 @@ from optparse import OptionParser
 from distutils.version import LooseVersion
 
 
-version_re = re.compile("__version__\s*=\s*'([^']+)'", re.M)
-version_info_re = re.compile(r"version_info\s*=\s*([^\n]+)")
-changeset_re = re.compile("__changeset__\s*=\s*'([^']+)'", re.M)
-hg_changeset_re = re.compile('changeset:\s+([^\s$]+)', re.M)
+version_re = re.compile("^__version__\s*=\s*'([^']+)'", re.M)
+version_info_re = re.compile(r"^version_info\s*=\s*([^\n]+)", re.M)
 strict_version_re = re.compile(r'^(\d+) \. (\d+) (\. (\d+))? ([ab](\d+))?$', re.VERBOSE)
 
 
-def get_changeset():
-    hg_head_command = os.popen('hg head')
-    data = hg_head_command.read()
-    retcode = hg_head_command.close()
+def read(command):
+    popen = os.popen(command)
+    data = popen.read()
+    retcode = popen.close()
     if retcode:
-        sys.exit('Failed (%s) to run "hg head"' % retcode)
-    m = hg_changeset_re.search(data)
-    if m is not None:
-        return m.group(1)
+        sys.exit('Failed (%s) to run %r' % (retcode, command))
+    return data.strip()
+
+
+def get_changeset():
+    return read('git describe --tags --always --dirty --long')
 
 
 def get_version_info(version):
@@ -42,10 +42,13 @@ def get_version_info(version):
     (1, 0, 0, 'dev', 1)
     >>> get_version_info('1.0a3')
     (1, 0, 0, 'alpha', 3)
+    >>> get_version_info('1.0rc1')
+    (1, 0, 0, 'candidate', 1)
     """
 
     repl = {'a': 'alpha',
             'b': 'beta',
+            'rc': 'candidate',
             'dev': 'dev'}
 
     components = LooseVersion(version).version
@@ -129,16 +132,25 @@ def write(filename, data):
 def main():
     global options
     parser = OptionParser()
-    parser.add_option('--version')
+    parser.add_option('--version', default='dev')
+    parser.add_option('--dry-run', action='store_true')
     options, args = parser.parse_args()
-    if options.version:
-        if strict_version_re.match(options.version) is None:
-            sys.exit('Not a strict version: %r (bdist_msi will fail)' % options.version)
-    assert len(args) == 1, args
+    assert len(args) == 1, 'One argument is expected, got %s' % len(args)
+    version = options.version
+    if version.lower() == 'dev':
+        version = ''
+    if version and strict_version_re.match(version) is None:
+        sys.stderr.write('WARNING: Not a strict version: %r (bdist_msi will fail)' % version)
     filename = args[0]
-    original_content, new_content = modify_version(filename, options.version)
-    write(filename, new_content)
-    print 'Updated %s' % filename
+    original_content, new_content = modify_version(filename, version)
+    if options.dry_run:
+        tmpname = '/tmp/' + os.path.basename(filename) + '.set_version'
+        write(tmpname, new_content)
+        if not os.system('diff -u %s %s' % (filename, tmpname)):
+            sys.exit('No differences applied')
+    else:
+        write(filename, new_content)
+        print 'Updated %s' % filename
 
 
 if __name__ == '__main__':

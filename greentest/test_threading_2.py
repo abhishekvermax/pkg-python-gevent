@@ -189,6 +189,7 @@ class ThreadTests(unittest.TestCase):
         self.assert_(isinstance(threading._active[tid],
                                 threading._DummyThread))
         del threading._active[tid]
+        # in gevent, we actually clean up threading._active, but it's not happended there yet
 
     # PyThreadState_SetAsyncExc() is a CPython-only gimmick, not (currently)
     # exposed at the Python level.  This test relies on ctypes to get at it.

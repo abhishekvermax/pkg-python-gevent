@@ -1,9 +1,10 @@
-from __future__ import absolute_import
+from __future__ import absolute_import, with_statement
 import sys
 import os
 from gevent.hub import get_hub
 from gevent.socket import EBADF
 from gevent.os import _read, _write, ignored_errors
+from gevent.lock import Semaphore, DummySemaphore
 
 
 try:
@@ -13,7 +14,7 @@ except ImportError:
 
 
 __all__ = ['FileObjectPosix',
-           'FileObjectThreadPool',
+           'FileObjectThread',
            'FileObject']
 
 
@@ -25,6 +26,7 @@ else:
 
     from gevent.socket import _fileobject, _get_memory
     cancel_wait_ex = IOError(EBADF, 'File descriptor was closed in another greenlet')
+    from gevent.os import make_nonblocking
 
     try:
         from gevent._util import SocketAdapter__del__, noop
@@ -55,7 +57,7 @@ else:
             self._mode = mode or 'rb'
             self._close = close
             self._translate = 'U' in self._mode
-            fcntl(fileno, F_SETFL, os.O_NONBLOCK)
+            make_nonblocking(fileno)
             self._eat_newline = False
             self.hub = get_hub()
             io = self.hub.loop.io
@@ -114,11 +116,7 @@ else:
                     data = _read(self.fileno(), size)
                 except (IOError, OSError):
                     code = sys.exc_info()[1].args[0]
-                    if code in ignored_errors:
-                        pass
-                    elif code == EBADF:
-                        return ''
-                    else:
+                    if code not in ignored_errors:
                         raise
                     sys.exc_clear()
                 else:
@@ -133,13 +131,7 @@ else:
                     if data.endswith('\r'):
                         self._eat_newline = True
                     return self._translate_newlines(data)
-                try:
-                    self.hub.wait(self._read_event)
-                except IOError:
-                    ex = sys.exc_info()[1]
-                    if ex.args[0] == EBADF:
-                        return ''
-                    raise
+                self.hub.wait(self._read_event)
 
         def _translate_newlines(self, data):
             data = data.replace("\r\n", "\n")
@@ -203,27 +195,39 @@ else:
         if not noop:
 
             def __del__(self):
+                # disable _fileobject's __del__
                 pass
 
     if noop:
         FileObjectPosix.__del__ = UnboundMethodType(FileObjectPosix, None, noop)
 
 
-class FileObjectThreadPool(object):
+class FileObjectThread(object):
 
     def __init__(self, fobj, *args, **kwargs):
         self._close = kwargs.pop('close', True)
         self.threadpool = kwargs.pop('threadpool', None)
+        self.lock = kwargs.pop('lock', True)
         if kwargs:
             raise TypeError('Unexpected arguments: %r' % kwargs.keys())
+        if self.lock is True:
+            self.lock = Semaphore()
+        elif not self.lock:
+            self.lock = DummySemaphore()
+        if not hasattr(self.lock, '__enter__'):
+            raise TypeError('Expected a Semaphore or boolean, got %r' % type(self.lock))
         if isinstance(fobj, (int, long)):
             if not self._close:
                 # we cannot do this, since fdopen object will close the descriptor
-                raise TypeError('FileObjectThreadPool does not support close=False')
+                raise TypeError('FileObjectThread does not support close=False')
             fobj = os.fdopen(fobj, *args)
         self._fobj = fobj
         if self.threadpool is None:
             self.threadpool = get_hub().threadpool
+
+    def _apply(self, func, args=None, kwargs=None):
+        with self.lock:
+            return self.threadpool.apply_e(BaseException, func, args, kwargs)
 
     def close(self):
         fobj = self._fobj
@@ -243,7 +247,7 @@ class FileObjectThreadPool(object):
             fobj = self._fobj
         if fobj is None:
             raise FileObjectClosed
-        return self.threadpool.apply_e(BaseException, fobj.flush)
+        return self._apply(fobj.flush)
 
     def __repr__(self):
         return '<%s _fobj=%r threadpool=%r>' % (self.__class__.__name__, self._fobj, self.threadpool)
@@ -260,7 +264,8 @@ class FileObjectThreadPool(object):
     fobj = self._fobj
     if fobj is None:
         raise FileObjectClosed
-    return self.threadpool.apply_e(BaseException, fobj.%s, args, kwargs)''' % (method, method)
+    return self._apply(fobj.%s, args, kwargs)
+''' % (method, method)
 
     def __iter__(self):
         return self
@@ -278,7 +283,7 @@ FileObjectClosed = IOError(EBADF, 'Bad file descriptor (FileObject was closed)')
 try:
     FileObject = FileObjectPosix
 except NameError:
-    FileObject = FileObjectThreadPool
+    FileObject = FileObjectThread
 
 
 class FileObjectBlock(object):
@@ -306,7 +311,7 @@ class FileObjectBlock(object):
 
 config = os.environ.get('GEVENT_FILE')
 if config:
-    klass = {'thread': 'gevent.fileobject.FileObjectThreadPool',
+    klass = {'thread': 'gevent.fileobject.FileObjectThread',
              'posix': 'gevent.fileobject.FileObjectPosix',
              'block': 'gevent.fileobject.FileObjectBlock'}.get(config, config)
     if klass.startswith('gevent.fileobject.'):

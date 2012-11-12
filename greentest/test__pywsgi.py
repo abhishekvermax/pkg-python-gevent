@@ -138,7 +138,7 @@ class Response(object):
     def assertHeader(self, header, value):
         real_value = self.headers.get(header, False)
         assert real_value == value, \
-               'Unexpected header %r: %r (expected %r)\n%s' % (header, real_value, value, self)
+            'Unexpected header %r: %r (expected %r)\n%s' % (header, real_value, value, self)
 
     def assertBody(self, body):
         assert self.body == body, 'Unexpected body: %r (expected %r)\n%s' % (self.body, body, self)
@@ -369,6 +369,44 @@ class TestYield(CommonTests):
         else:
             start_response('404 Not Found', [('Content-Type', 'text/plain')])
             yield "not found"
+
+
+if sys.version_info[:2] >= (2, 6):
+
+    class TestBytearray(CommonTests):
+
+        validator = None
+
+        @staticmethod
+        def application(env, start_response):
+            path = env['PATH_INFO']
+            if path == '/':
+                start_response('200 OK', [('Content-Type', 'text/plain')])
+                return [bytearray("hello "), bytearray("world")]
+            else:
+                start_response('404 Not Found', [('Content-Type', 'text/plain')])
+                return [bytearray("not found")]
+
+
+class MultiLineHeader(TestCase):
+    @staticmethod
+    def application(env, start_response):
+        assert "test.submit" in env["CONTENT_TYPE"]
+        start_response('200 OK', [('Content-Type', 'text/plain')])
+        return ["ok"]
+
+    def test_multiline_116(self):
+        """https://github.com/SiteSupport/gevent/issues/116"""
+        request = '\r\n'.join((
+            'POST / HTTP/1.0',
+            'Host: localhost',
+            'Content-Type: multipart/related; boundary="====XXXX====";',
+            ' type="text/xml";start="test.submit"',
+            'Content-Length: 0',
+            '', ''))
+        fd = self.makefile()
+        fd.write(request)
+        read_http(fd, version='1.0')
 
 
 class TestGetArg(TestCase):

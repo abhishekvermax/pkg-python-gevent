@@ -73,16 +73,19 @@ def wrap_switch_count_check(method):
 def wrap_timeout(timeout, method):
     if timeout is None:
         return method
+
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        with gevent.Timeout(timeout, 'test timed out'):
+        with gevent.Timeout(timeout, 'test timed out', ref=False):
             return method(self, *args, **kwargs)
+
     return wrapped
 
 
 def wrap_refcount(method):
     if gettotalrefcount is None:
         return method
+
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         import gc
@@ -118,21 +121,24 @@ def wrap_refcount(method):
                 # OK, we don't know for sure yet. Let's search for more
                 if sum(deltas[-3:]) <= 0 or sum(deltas[-4:]) <= 0 or deltas[-4:].count(0) >= 2:
                     # this is suspicious, so give a few more runs
-                    limit = 10
+                    limit = 11
                 else:
-                    limit = 6
+                    limit = 7
                 if len(deltas) >= limit:
                     raise AssertionError('refcount increased by %r' % (deltas, ))
         finally:
             gc.collect()
             gc.enable()
         self.skipTearDown = True
+
     return wrapped
 
 
 def wrap_error_fatal(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
+        # XXX should also be able to do gevent.SYSTEM_ERROR = object
+        # which is a global default to all hubs
         SYSTEM_ERROR = gevent.get_hub().SYSTEM_ERROR
         gevent.get_hub().SYSTEM_ERROR = object
         try:
@@ -260,7 +266,7 @@ class TestCase(BaseTestCase):
         if error is None:
             error = self.get_error()
         if type is not None:
-           assert error[1] is type, error
+            assert error[1] is type, error
         if value is not None:
             if isinstance(value, str):
                 assert str(error[2]) == value, error
@@ -308,10 +314,10 @@ class GenericWaitTestCase(TestCase):
 
     def test_returns_none_after_timeout(self):
         start = time.time()
-        result = self.wait(timeout=0.02)
-        # join and wait simply returns after timeout expires
+        result = self.wait(timeout=0.2)
+        # join and wait simply return after timeout expires
         delay = time.time() - start
-        assert 0.02 - 0.002 <= delay < 0.02 + 0.02, delay
+        assert 0.2 - 0.1 <= delay < 0.2 + 0.1, delay
         assert result is None, repr(result)
 
 
@@ -382,8 +388,12 @@ def walk_modules(basedir=None, modpath=None, include_so=False):
                 for p, m in walk_modules(path, modpath + fn + "."):
                     yield p, m
             continue
-        if fn.endswith('.py') and fn not in ['__init__.py', 'core.py', 'ares.py', '_util.py', '_semaphore.py']:
-            yield path, modpath + fn[:-3]
+        if fn.endswith('.py'):
+            x = fn[:-3]
+            if x.endswith('_d'):
+                x = x[:-2]
+            if x not in ['__init__', 'core', 'ares', '_util', '_semaphore']:
+                yield path, modpath + x
         elif include_so and fn.endswith('.so'):
             if fn.endswith('_d.so'):
                 yield path, modpath + fn[:-5]

@@ -8,9 +8,9 @@ See http://www.gevent.org/ for the documentation.
 
 from __future__ import absolute_import
 
-version_info = (1, 0, 0, 'beta', 4)
-__version__ = '1.0b4'
-__changeset__ = '2641:a79f019200ac'
+version_info = (1, 0, 0, 'candidate', 1)
+__version__ = '1.0rc1'
+__changeset__ = '1.0rc1-0-g92bff11'
 
 
 __all__ = ['get_hub',
@@ -19,7 +19,8 @@ __all__ = ['get_hub',
            'spawn',
            'spawn_later',
            'spawn_raw',
-           'joinall',
+           'iwait',
+           'wait',
            'killall',
            'Timeout',
            'with_timeout',
@@ -29,17 +30,10 @@ __all__ = ['get_hub',
            'kill',
            'signal',
            'fork',
-           'reinit',
-           'run']
+           'reinit']
 
 
-import sys
-if sys.platform == 'win32':
-    import socket  # trigger WSAStartup call
-del sys
-
-
-from gevent.hub import get_hub
+from gevent.hub import get_hub, iwait, wait
 from gevent.greenlet import Greenlet, joinall, killall
 spawn = Greenlet.spawn
 spawn_later = Greenlet.spawn_later
@@ -50,6 +44,4 @@ try:
 except ImportError:
     __all__.remove('fork')
 
-
-def run(timeout=None, event=None):
-    return get_hub().join(timeout=timeout, event=event)
+run = wait  # XXX to be deleted (soon)

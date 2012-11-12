@@ -1,147 +1,134 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-# testrunner timeout: 300
 from __future__ import with_statement
 import sys
 import re
-import traceback
 import greentest
 import socket
 from time import time
 import gevent
 import gevent.socket as gevent_socket
+from util import log
 
-
-RAISE_TOO_SLOW = False
-# also test: '<broadcast>'
 
 resolver = gevent.get_hub().resolver
-sys.stderr.write('Resolver: %s\n' % resolver)
+log('Resolver: %s', resolver)
 
-if hasattr(resolver, 'ares'):
-    accept_results = [
-                  # Python's socketmodule.c randomly chooses between gaierror and herror when raising an exception
-                  # There are also a number of error code that are mapped to ARES_ENOTFOUND
-
-                  ("gaierror(4, 'ARES_ENOTFOUND: Domain name not found')",
-                   "herror(1, 'Unknown host')"),
-
-                  ("gaierror(4, 'ARES_ENOTFOUND: Domain name not found')",
-                   "gaierror(-2, 'Name or service not known')"),
-
-                  ("gaierror(4, 'ARES_ENOTFOUND: Domain name not found')",
-                   "gaierror(-5, 'No address associated with hostname')"),
-
-                  ("gaierror(1, 'ARES_ENODATA: DNS server returned answer with no data')",
-                   "herror(4, 'No address associated with name')"),
-
-                  ("gaierror(1, 'ARES_ENODATA: DNS server returned answer with no data')",
-                   "gaierror(-5, 'No address associated with hostname')"),
-
-                  # windows has its own error codes:
-                  ("gaierror(4, 'ARES_ENOTFOUND: Domain name not found')",
-                   "gaierror(11001, 'getaddrinfo failed')"),
-
-                  ("gaierror(4, 'ARES_ENOTFOUND: Domain name not found')",
-                   "herror(11004, 'host not found')"),
-
-                  # _socket.gethostbyname_ex('\x00') checks for zeroes and raises TypeError
-                  # but it's not worth the trouble
-                  ("gaierror(1, 'ARES_ENODATA: DNS server returned answer with no data')",
-                   "TypeError('must be string without null bytes, not str',)",),
-
-                  # in some cases gevent error messages are better:
-                  ("gaierror(-1, 'Bad value for ai_flags: 0x34fb5e0')",
-                   "gaierror(-1, 'Bad value for ai_flags')"),
-
-                  ("gaierror(-8, 'Invalid value for port: -1')",
-                   "gaierror(-8, 'Servname not supported for ai_socktype')"),
-
-                  ("gaierror(-8, 'Invalid value for port: 65536')",
-                   "gaierror(-8, 'Servname not supported for ai_socktype')"),
-
-                  # in some cases the error is different, but that's OK
-                  ("error('sockaddr resolved to multiple addresses',)",
-                   "TypeError('must be string, not None',)"),
-
-                  # in some cases gevent succeeds but stdlib fails
-                  # don't care enough about it to fix it
-                  ("('kremlin.ru', 'www')",
-                   "UnicodeEncodeError('ascii', u'\u043f\u0440\u0435\u0437\u0438\u0434\u0435\u043d\u0442.\u0440\u0444', 0, 9, 'ordinal not in range(128)')",
-                   'getnameinfo')]
-else:
-    accept_results = [("gaierror(-5, 'No address associated with hostname')",
-                       "gaierror(-2, 'Name or service not known')")]
+if getattr(resolver, 'pool', None) is not None:
     resolver.pool.size = 1
 
 
 assert gevent_socket.gaierror is socket.gaierror
 assert gevent_socket.error is socket.error
 
-VERBOSE = sys.argv.count('-v') + 2 * sys.argv.count('-vv')
-PASS = True
-LOGFILE = sys.stderr
-
-
-def log(s, *args, **kwargs):
-    newline = kwargs.pop('newline', True)
-    assert not kwargs, kwargs
-    if not VERBOSE:
-        return
-    try:
-        s = s % args
-    except Exception:
-        traceback.print_exc()
-        s = '%s %r' % (s, args)
-    if newline:
-        s += '\n'
-    LOGFILE.write(s)
+DEBUG = False
 
 
 def _run(function, *args):
     try:
         result = function(*args)
-        assert not isinstance(result, Exception), repr(result)
+        assert not isinstance(result, BaseException), repr(result)
         return result
     except Exception:
         return sys.exc_info()[1]
 
 
-def log_fcall(function, args):
+def format_call(function, args):
     args = repr(args)
     if args.endswith(',)'):
         args = args[:-2] + ')'
-    log('\n%7s.%s%s',
-        function.__module__.replace('gevent.socket', 'gevent'),
-        function.__name__,
-        args,
-        newline=False)
+    try:
+        module = function.__module__.replace('gevent.socket', 'gevent').replace('_socket', 'stdlib')
+        name = function.__name__
+        return '%s:%s%s' % (module, name, args)
+    except AttributeError:
+        return function + args
 
 
 def log_fresult(result, seconds):
     if isinstance(result, Exception):
-        log(' -> raised %r (%.3f)', result, seconds * 1000.0)
+        msg = '  -=>  raised %r' % (result, )
     else:
-        log(' -> returned %r (%.3f)', result, seconds * 1000.0)
+        msg = '  -=>  returned %r' % (result, )
+    time = ' %.2fms' % (seconds * 1000.0, )
+    space = 80 - len(msg) - len(time)
+    if space > 0:
+        space = ' ' * space
+    else:
+        space = ''
+    log(msg + space + time)
 
 
 def run(function, *args):
-    if VERBOSE >= 2:
-        log_fcall(function, args)
+    if DEBUG:
+        log(format_call(function, args))
     delta = time()
     result = _run(function, *args)
     delta = time() - delta
-    if VERBOSE >= 2:
+    if DEBUG:
         log_fresult(result, delta)
     return result, delta
 
 
 def log_call(result, time, function, *args):
-    log_fcall(function, args)
+    log(format_call(function, args))
     log_fresult(result, time)
 
 
-def add(klass, hostname, name=None, call=False):
+google_host_re = re.compile('^arn[a-z0-9-]+.1e100.net$')
+
+
+def compare_ipv6(a, b):
+    """
+    >>> compare_ipv6('2a00:1450:400f:801::1010', '2a00:1450:400f:800::1011')
+    True
+    >>> compare_ipv6('2a00:1450:400f:801::1010', '2aXX:1450:400f:900::1011')
+    False
+    >>> compare_ipv6('2a00:1450:4016:800::1013', '2a00:1450:4008:c01::93')
+    True
+    """
+    if a.count(':') == 5 and b.count(':') == 5:
+        # QQQ not actually sure if this is right thing to do
+        return a.rsplit(':')[:2] == b.rsplit(':')[:2]
+    if google_host_re.match(a) and google_host_re.match(b):
+        return True
+    return a == b
+
+
+def contains_5tuples(lst):
+    for item in lst:
+        if not (isinstance(item, tuple) and len(item) == 5):
+            return False
+    return True
+
+
+def relaxed_is_equal(a, b):
+    """
+    >>> relaxed_is_equal([(10, 1, 6, '', ('2a00:1450:400f:801::1010', 80, 0, 0))], [(10, 1, 6, '', ('2a00:1450:400f:800::1011', 80, 0, 0))])
+    True
+    >>> relaxed_is_equal([1, '2'], (1, '2'))
+    False
+    >>> relaxed_is_equal([1, '2'], [1, '2'])
+    True
+    """
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, basestring):
+        return compare_ipv6(a, b)
+    if hasattr(a, '__iter__'):
+        if len(a) != len(b):
+            return False
+        if contains_5tuples(a) and contains_5tuples(b):
+            # getaddrinfo results
+            a = sorted(a)
+            b = sorted(b)
+        return all(relaxed_is_equal(x, y) for (x, y) in zip(a, b))
+    return a == b
+
+
+def add(klass, hostname, name=None):
+
+    call = callable(hostname)
 
     if name is None:
         if call:
@@ -183,76 +170,52 @@ def add(klass, hostname, name=None, call=False):
     setattr(klass, test5.__name__, test5)
 
 
-class TooSlow(AssertionError):
-    pass
-
-
 class TestCase(greentest.TestCase):
 
-    __timeout__ = 60
+    __timeout__ = 30
     switch_expected = None
 
-    def _test_once(self, func, *args):
+    def should_log_results(self, result1, result2):
+        if isinstance(result1, BaseException) and isinstance(result2, BaseException):
+            return type(result1) is not type(result2)
+        return repr(result1) != repr(result2)
+
+    def _test(self, func, *args):
         gevent_func = getattr(gevent_socket, func)
         real_func = getattr(socket, func)
         real_result, time_real = run(real_func, *args)
-        result, time_gevent = run(gevent_func, *args)
-        if VERBOSE == 1 and repr(result) != repr(real_result):
-            # slightly less verbose mode: only print the results that are different
-            log_call(result, time_gevent, gevent_func, *args)
+        gevent_result, time_gevent = run(gevent_func, *args)
+        if not DEBUG and self.should_log_results(real_result, gevent_result):
+            log('')
             log_call(real_result, time_real, real_func, *args)
-            log('')
-        elif VERBOSE >= 2:
-            log('')
-        self.assertEqualResults(real_result, result, func)
-        if isinstance(real_result, Exception):
-            if isinstance(result, Exception):
-                # built-in socket module is faster at raising exceptions
-                allowed = 2.
-            else:
-                # built-in socket module raised an error, gevent made a real query
-                allowed = 100000.
-        else:
-            allowed = 1.2
-        if time_gevent / allowed > time_real and (time_gevent + time_real) > 0.0005:
-            # QQQ use clock() on windows
-            times = None
-            if not time_real:
-                if time_gevent:
-                    times = time_gevent / 0.001
-                else:
-                    times = 1
-            if times is None:
-                times = time_gevent / time_real
-            params = (func, args, times, time_gevent * 1000.0, time_real * 1000.0)
-            raise TooSlow('gevent_socket.%s%s is %.1f times slower (%.3fms versus %.3fms)' % params)
-        return result
+            log_call(gevent_result, time_gevent, gevent_func, *args)
+        self.assertEqualResults(real_result, gevent_result, func, args)
 
-    def _test(self, func, *args):
-        try:
-            return self._test_once(func, *args)
-        except AssertionError, ex:
-            sys.stderr.write('\n%s (retrying)\n' % ex)
-        try:
-            return self._test_once(func, *args)
-        except TooSlow, ex:
-            if RAISE_TOO_SLOW:
-                raise
-            else:
-                sys.stderr.write('WARNING: %s\n' % ex)
+        if time_gevent > time_real + 0.01 and time_gevent > 0.02:
+            msg = 'gevent:%s%s took %dms versus %dms stdlib' % (func, args, time_gevent * 1000.0, time_real * 1000.0)
 
-    def assertEqualResults(self, real_result, gevent_result, func):
-        if type(real_result) is TypeError and type(gevent_result) is TypeError:
+            if time_gevent > time_real + 1:
+                word = 'VERY'
+            else:
+                word = 'quite'
+
+            log('\nWARNING: %s slow: %s', word, msg)
+
+        return gevent_result
+
+    def assertEqualResults(self, real_result, gevent_result, func, args):
+        errors = [socket.gaierror, socket.herror, TypeError]
+        if type(real_result) in errors and type(gevent_result) in errors:
+            if type(real_result) is not type(gevent_result):
+                log('WARNING: error type mismatch: %r (gevent) != %r (stdlib)', gevent_result, real_result)
             return
-        real_result = repr(real_result)
-        gevent_result = repr(gevent_result)
-        if real_result == gevent_result:
+        real_result_repr = repr(real_result)
+        gevent_result_repr = repr(gevent_result)
+        if real_result_repr == gevent_result_repr:
             return
-        if (gevent_result, real_result) in accept_results:
+        if relaxed_is_equal(gevent_result, real_result):
             return
-        if (gevent_result, real_result, func) in accept_results:
-            return
-        raise AssertionError('%s != %s' % (gevent_result, real_result))
+        raise AssertionError('%r != %r\n    %s' % (gevent_result, real_result, format_call(func, args)))
 
 
 class TestTypeError(TestCase):
@@ -265,7 +228,7 @@ add(TestTypeError, 25)
 class TestHostname(TestCase):
     pass
 
-add(TestHostname, socket.gethostname, call=True)
+add(TestHostname, socket.gethostname)
 
 
 class TestLocalhost(TestCase):
@@ -275,6 +238,7 @@ class TestLocalhost(TestCase):
     #switch_expected = False
 
 add(TestLocalhost, 'localhost')
+add(TestLocalhost, 'ip6-localhost')
 
 
 class TestNonexistent(TestCase):
@@ -295,10 +259,11 @@ class Test127001(TestCase):
 add(Test127001, '127.0.0.1')
 
 
-# class TestBroadcast(TestCase):
-#     switch_expected = False
-#
-# add(TestBroadcast, '<broadcast>')
+class TestBroadcast(TestCase):
+    switch_expected = False
+
+
+add(TestBroadcast, '<broadcast>')
 
 
 class TestEtcHosts(TestCase):
@@ -403,11 +368,15 @@ class TestInterrupted_gethostbyname(greentest.GenericWaitTestCase):
 
     def wait(self, timeout):
         with gevent.Timeout(timeout, False):
-            for index in range(1000):
+            for index in xrange(1000000):
                 try:
                     gevent_socket.gethostbyname('www.x%s.com' % index)
                 except socket.error:
                     pass
+            raise AssertionError('Timeout was not raised')
+
+    def cleanup(self):
+        gevent.get_hub().threadpool.join()
 
 
 # class TestInterrupted_getaddrinfo(greentest.GenericWaitTestCase):
@@ -419,39 +388,6 @@ class TestInterrupted_gethostbyname(greentest.GenericWaitTestCase):
 #                     gevent_socket.getaddrinfo('www.a%s.com' % index, 'http')
 #                 except socket.gaierror:
 #                     pass
-
-
-class Test6(TestCase):
-    pass
-
-    # host that only has AAAA record
-    host = 'aaaa.test-ipv6.com'
-
-    def test_empty(self):
-        self._test('getaddrinfo', self.host, 'http')
-
-    def test_inet(self):
-        self._test('getaddrinfo', self.host, None, socket.AF_INET)
-
-    def test_inet6(self):
-        self._test('getaddrinfo', self.host, None, socket.AF_INET6)
-
-    def test_unspec(self):
-        self._test('getaddrinfo', self.host, None, socket.AF_UNSPEC)
-
-
-class Test6_google(Test6):
-    host = 'ipv6.google.com'
-
-
-class Test6_ds(Test6):
-    # host that has both A and AAAA records
-    host = 'ds.test-ipv6.com'
-
-
-add(Test6, Test6.host)
-add(Test6_google, Test6_google.host)
-add(Test6_ds, Test6_ds.host)
 
 
 class TestBadName(TestCase):

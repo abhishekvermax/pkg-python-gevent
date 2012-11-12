@@ -1,8 +1,10 @@
-import unittest
+import greentest
 from gevent import core
 
 
-class Test(unittest.TestCase):
+class Test(greentest.TestCase):
+
+    __timeout__ = None
 
     def test_types(self):
         loop = core.loop()
@@ -17,8 +19,8 @@ class Test(unittest.TestCase):
         io.start(lambda *args: lst.append(args))
         self.assertEqual(io.args, ())
         try:
-            io.callback = None
-            raise AssertionError('"io.callback = None" must raise TypeError')
+            io.callback = False
+            raise AssertionError('"io.callback = False" must raise TypeError')
         except TypeError:
             pass
         try:
@@ -43,8 +45,11 @@ class Test(unittest.TestCase):
         self.assertEqual(io.args, (1, 2, 3))
         # None also works, means empty tuple
         io.args = None
+        start = core.time()
         loop.run()
+        took = core.time() - start
         self.assertEqual(lst, [()])
+        assert took < 1, took
 
         io.start(reset, io, lst)
         del io
@@ -59,4 +64,4 @@ def reset(watcher, lst):
 
 
 if __name__ == '__main__':
-    unittest.main()
+    greentest.main()

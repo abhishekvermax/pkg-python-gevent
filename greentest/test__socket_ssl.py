@@ -1,7 +1,7 @@
 #!/usr/bin/python
 from gevent import monkey; monkey.patch_all()
 import sys
-import unittest
+import greentest
 try:
     import httplib
 except ImportError:
@@ -12,7 +12,9 @@ if not hasattr(socket, 'ssl'):
     sys.exit(0)
 
 
-class AmazonHTTPSTests(unittest.TestCase):
+class AmazonHTTPSTests(greentest.TestCase):
+
+    __timeout__ = 30
 
     def test_amazon_response(self):
         conn = httplib.HTTPSConnection('sdb.amazonaws.com')
@@ -29,4 +31,4 @@ class AmazonHTTPSTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    greentest.main()
