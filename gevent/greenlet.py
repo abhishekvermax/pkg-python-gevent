@@ -1,8 +1,9 @@
 # Copyright (c) 2009-2012 Denis Bilenko. See LICENSE for details.
 
 import sys
-from gevent.hub import greenlet, getcurrent, get_hub, GreenletExit, Waiter, PY3
+from gevent.hub import greenlet, getcurrent, get_hub, GreenletExit, Waiter, PY3, iwait, wait
 from gevent.timeout import Timeout
+from collections import deque
 
 
 __all__ = ['Greenlet',
@@ -77,11 +78,11 @@ class Greenlet(greenlet):
             self._run = run
         self.args = args
         self.kwargs = kwargs
-        self._links = []
+        self._links = deque()
         self.value = None
         self._exception = _NONE
         loop = hub.loop
-        self._notifier = loop.callback()
+        self._notifier = None
         self._start_event = None
 
     @property
@@ -184,8 +185,7 @@ class Greenlet(greenlet):
     def start(self):
         """Schedule the greenlet to run in this loop iteration"""
         if self._start_event is None:
-            self._start_event = self.parent.loop.callback()
-            self._start_event.start(self.switch)
+            self._start_event = self.parent.loop.run_callback(self.switch)
 
     def start_later(self, seconds):
         """Schedule the greenlet to run in the future loop iteration *seconds* later"""
@@ -303,8 +303,8 @@ class Greenlet(greenlet):
     def _report_result(self, result):
         self._exception = None
         self.value = result
-        if self._links and not self._notifier.active:
-            self._notifier.start(self._notify_links)
+        if self._links and not self._notifier:
+            self._notifier = self.parent.loop.run_callback(self._notify_links)
 
     def _report_error(self, exc_info):
         exception = exc_info[1]
@@ -313,8 +313,8 @@ class Greenlet(greenlet):
             return
         self._exception = exception
 
-        if self._links and not self._notifier.active:
-            self._notifier.start(self._notify_links)
+        if self._links and not self._notifier:
+            self._notifier = self.parent.loop.run_callback(self._notify_links)
 
         self.parent.handle_error(self, *exc_info)
 
@@ -343,8 +343,8 @@ class Greenlet(greenlet):
         if not callable(callback):
             raise TypeError('Expected callable: %r' % (callback, ))
         self._links.append(callback)
-        if self.ready() and not self._notifier.active:
-            self._notifier.start(self._notify_links)
+        if self.ready() and self._links and not self._notifier:
+            self._notifier = self.parent.loop.run_callback(self._notify_links)
 
     def link(self, receiver, SpawnedLink=SpawnedLink):
         """Link greenlet's completion to a callable.
@@ -371,7 +371,7 @@ class Greenlet(greenlet):
 
     def _notify_links(self):
         while self._links:
-            link = self._links.pop()
+            link = self._links.popleft()
             try:
                 link(self)
             except:
@@ -391,43 +391,22 @@ def _kill(greenlet, exception, waiter):
     try:
         greenlet.throw(exception)
     except:
+        # XXX do we need this here?
         greenlet.parent.handle_error(greenlet, *sys.exc_info())
     waiter.switch()
 
 
-try:
-    xrange
-except NameError:
-    xrange = range
-
-
 def joinall(greenlets, timeout=None, raise_error=False, count=None):
-    from gevent.queue import Queue
-    queue = Queue()
-    put = queue.put
-    if count is None:
-        count = len(greenlets)
-    timeout = Timeout.start_new(timeout)
-    try:
-        try:
-            for greenlet in greenlets:
-                greenlet.rawlink(put)
-            if raise_error:
-                for _ in xrange(count):
-                    greenlet = queue.get()
-                    if not greenlet.successful():
-                        raise greenlet.exception
-            else:
-                for _ in xrange(count):
-                    queue.get()
-        except:
-            if sys.exc_info()[1] is not timeout:
-                raise
-        finally:
-            for greenlet in greenlets:
-                greenlet.unlink(put)
-    finally:
-        timeout.cancel()
+    if not raise_error:
+        wait(greenlets, timeout=timeout)
+    else:
+        for obj in iwait(greenlets, timeout=timeout):
+            if getattr(obj, 'exception', None) is not None:
+                raise obj.exception
+            if count is not None:
+                count -= 1
+                if count <= 0:
+                    break
 
 
 def _killall3(greenlets, exception, waiter):

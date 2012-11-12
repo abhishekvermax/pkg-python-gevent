@@ -15,10 +15,17 @@ class Resolver(object):
 
     ares_class = channel
 
-    def __init__(self, hub=None, **kwargs):
+    def __init__(self, hub=None, use_environ=True, **kwargs):
         if hub is None:
             hub = get_hub()
         self.hub = hub
+        if use_environ:
+            for key in os.environ.iterkeys():
+                if key.startswith('GEVENTARES_'):
+                    name = key[11:].lower()
+                    if name:
+                        value = os.environ[key]
+                        kwargs.setdefault(name, value)
         self.ares = self.ares_class(hub.loop, **kwargs)
         self.pid = os.getpid()
         self.params = kwargs
@@ -46,6 +53,11 @@ class Resolver(object):
         return self.gethostbyname_ex(hostname, family)[-1][0]
 
     def gethostbyname_ex(self, hostname, family=AF_INET):
+        if isinstance(hostname, unicode):
+            hostname = hostname.encode('ascii')
+        elif not isinstance(hostname, str):
+            raise TypeError('Expected string, not %s' % type(hostname).__name__)
+
         while True:
             ares = self.ares
             try:
@@ -61,18 +73,26 @@ class Resolver(object):
                 # "self.ares is not ares" means channel was destroyed (because we were forked)
 
     def _lookup_port(self, port, socktype):
+        socktypes = []
         if isinstance(port, string_types):
             try:
                 port = int(port)
             except ValueError:
                 try:
                     if socktype == 0:
+                        origport = port
                         try:
                             port = getservbyname(port, 'tcp')
-                            socktype = SOCK_STREAM
+                            socktypes.append(SOCK_STREAM)
                         except error:
                             port = getservbyname(port, 'udp')
-                            socktype = SOCK_DGRAM
+                            socktypes.append(SOCK_DGRAM)
+                        else:
+                            try:
+                                if port == getservbyname(origport, 'udp'):
+                                    socktypes.append(SOCK_DGRAM)
+                            except error:
+                                pass
                     elif socktype == SOCK_STREAM:
                         port = getservbyname(port, 'tcp')
                     elif socktype == SOCK_DGRAM:
@@ -94,7 +114,9 @@ class Resolver(object):
         else:
             raise error('Int or String expected')
         port = int(port % 65536)
-        return port, socktype
+        if not socktypes and socktype:
+            socktypes.append(socktype)
+        return port, socktypes
 
     def _getaddrinfo(self, host, port, family=0, socktype=0, proto=0, flags=0):
         if isinstance(host, unicode):
@@ -107,11 +129,11 @@ class Resolver(object):
             return getaddrinfo(host, port, family, socktype, proto, flags)
             # we also call _socket.getaddrinfo below if family is not one of AF_*
 
-        port, socktype = self._lookup_port(port, socktype)
+        port, socktypes = self._lookup_port(port, socktype)
 
         socktype_proto = [(SOCK_STREAM, 6), (SOCK_DGRAM, 17), (SOCK_RAW, 0)]
-        if socktype:
-            socktype_proto = [(x, y) for (x, y) in socktype_proto if socktype == x]
+        if socktypes:
+            socktype_proto = [(x, y) for (x, y) in socktype_proto if x in socktypes]
         if proto:
             socktype_proto = [(x, y) for (x, y) in socktype_proto if proto == y]
 
@@ -128,8 +150,7 @@ class Resolver(object):
             values = Values(self.hub, 1)
             ares.gethostbyname(values, host, AF_INET6)
         else:
-            # most likely will raise the exception, let the original getaddrinfo do it
-            return getaddrinfo(host, port, family, socktype, proto, flags)
+            raise gaierror(5, 'ai_family not supported: %r' % (family, ))
 
         values = values.get()
         if len(values) == 2 and values[0] == values[1]:
@@ -172,6 +193,11 @@ class Resolver(object):
                     raise
 
     def _gethostbyaddr(self, ip_address):
+        if isinstance(ip_address, unicode):
+            ip_address = ip_address.encode('ascii')
+        elif not isinstance(ip_address, str):
+            raise TypeError('Expected string, not %s' % type(ip_address).__name__)
+
         waiter = Waiter(self.hub)
         try:
             self.ares.gethostbyaddr(waiter, ip_address)
@@ -203,8 +229,19 @@ class Resolver(object):
         if not isinstance(sockaddr, tuple):
             raise TypeError('getnameinfo() argument 1 must be a tuple')
 
+        address = sockaddr[0]
+        if isinstance(address, unicode):
+            address = address.encode('ascii')
+
+        if not isinstance(address, str):
+            raise TypeError('sockaddr[0] must be a string, not %s' % type(address).__name__)
+
+        port = sockaddr[1]
+        if not isinstance(port, int):
+            raise TypeError('port must be an integer, not %s' % type(port))
+
         waiter = Waiter(self.hub)
-        result = self._getaddrinfo(sockaddr[0], str(sockaddr[1]), family=AF_UNSPEC, socktype=SOCK_DGRAM)
+        result = self._getaddrinfo(address, str(sockaddr[1]), family=AF_UNSPEC, socktype=SOCK_DGRAM)
         if not result:
             raise
         elif len(result) != 1:

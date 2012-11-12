@@ -385,19 +385,11 @@ class socket(object):
                 return sock.recv(*args)
             except error:
                 ex = sys.exc_info()[1]
-                if ex.args[0] == EBADF:
-                    return ''
                 if ex.args[0] != EWOULDBLOCK or self.timeout == 0.0:
                     raise
                 # QQQ without clearing exc_info test__refcount.test_clean_exit fails
                 sys.exc_clear()
-            try:
-                self._wait(self._read_event)
-            except error:
-                ex = sys.exc_info()[1]
-                if ex.args[0] == EBADF:
-                    return ''
-                raise
+            self._wait(self._read_event)
 
     def recvfrom(self, *args):
         sock = self._sock
@@ -430,18 +422,10 @@ class socket(object):
                 return sock.recv_into(*args)
             except error:
                 ex = sys.exc_info()[1]
-                if ex.args[0] == EBADF:
-                    return 0
                 if ex.args[0] != EWOULDBLOCK or self.timeout == 0.0:
                     raise
                 sys.exc_clear()
-            try:
-                self._wait(self._read_event)
-            except error:
-                ex = sys.exc_info()[1]
-                if ex.args[0] == EBADF:
-                    return 0
-                raise
+            self._wait(self._read_event)
 
     def send(self, data, flags=0, timeout=timeout_default):
         sock = self._sock
@@ -454,13 +438,7 @@ class socket(object):
             if ex.args[0] != EWOULDBLOCK or timeout == 0.0:
                 raise
             sys.exc_clear()
-            try:
-                self._wait(self._write_event)
-            except error:
-                ex = sys.exc_info()[1]
-                if ex.args[0] == EBADF:
-                    return 0
-                raise
+            self._wait(self._write_event)
             try:
                 return sock.send(data, flags)
             except error:
@@ -589,7 +567,7 @@ def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT, source_address=N
 
     host, port = address
     err = None
-    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+    for res in getaddrinfo(host, port, 0 if has_ipv6 else AF_INET, SOCK_STREAM):
         af, socktype, proto, _canonname, sa = res
         sock = None
         try:

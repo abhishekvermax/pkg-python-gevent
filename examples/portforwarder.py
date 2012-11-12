@@ -33,6 +33,7 @@ class PortForwarder(StreamServer):
             return
         gevent.spawn(forward, source, dest)
         gevent.spawn(forward, dest, source)
+        # XXX only one spawn() is needed
 
     def close(self):
         if self.closed:
@@ -77,7 +78,7 @@ def main():
     gevent.signal(signal.SIGTERM, server.close)
     gevent.signal(signal.SIGINT, server.close)
     server.start()
-    gevent.run()
+    gevent.wait()
 
 
 def log(message, *args):

@@ -1,4 +1,3 @@
-import sys
 from greentest import walk_modules, BaseTestCase, main
 import six
 
@@ -23,6 +22,7 @@ def make_exec_test(path, module):
 
 for path, module in walk_modules():
     make_exec_test(path, module)
+
 
 if __name__ == '__main__':
     main()

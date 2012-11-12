@@ -1,3 +1,4 @@
+from __future__ import with_statement
 import sys
 from time import time, sleep
 import random
@@ -213,15 +214,19 @@ class TestSpawn(TestCase):
     def test(self):
         self.pool = pool = ThreadPool(1)
         self.assertEqual(len(pool), 0)
-        pool.spawn(sleep, 0.1)
+        log = []
+        sleep_n_log = lambda item, seconds: [sleep(seconds), log.append(item)]
+        pool.spawn(sleep_n_log, 'a', 0.1)
         self.assertEqual(len(pool), 1)
-        pool.spawn(sleep, 0.1)
+        pool.spawn(sleep_n_log, 'b', 0.1)
         # even though the pool is of size 1, it can contain 2 items
         # since we allow +1 for better throughput
         self.assertEqual(len(pool), 2)
-        gevent.sleep(0.11)
+        gevent.sleep(0.15)
+        self.assertEqual(log, ['a'])
         self.assertEqual(len(pool), 1)
-        gevent.sleep(0.11)
+        gevent.sleep(0.15)
+        self.assertEqual(log, ['a', 'b'])
         self.assertEqual(len(pool), 0)
 
 
@@ -232,6 +237,7 @@ def error_iter():
 
 
 class TestErrorInIterator(TestCase):
+
     error_fatal = False
 
     def test(self):
@@ -241,8 +247,10 @@ class TestErrorInIterator(TestCase):
 
     def test_unordered(self):
         self.pool = ThreadPool(3)
+
         def unordered():
             return list(self.pool.imap_unordered(lambda x: None, error_iter()))
+
         self.assertRaises(greentest.ExpectedException, unordered)
         gevent.sleep(0.001)
 
@@ -262,13 +270,13 @@ class TestMaxsize(TestCase):
 
     def test_setzero(self):
         pool = self.pool = ThreadPool(3)
-        pool.spawn(sleep, 0.001)
-        pool.spawn(sleep, 0.002)
-        pool.spawn(sleep, 0.003)
-        gevent.sleep(0.001)
+        pool.spawn(sleep, 0.1)
+        pool.spawn(sleep, 0.2)
+        pool.spawn(sleep, 0.3)
+        gevent.sleep(0.2)
         self.assertEqual(pool.size, 3)
         pool.maxsize = 0
-        gevent.sleep(0.01)
+        gevent.sleep(0.2)
         self.assertEqual(pool.size, 0)
 
 
@@ -283,11 +291,15 @@ class TestSize(TestCase):
         self.assertEqual(pool.size, 2)
         pool.size = 1
         self.assertEqual(pool.size, 1)
+
         def set_neg():
             pool.size = -1
+
         self.assertRaises(ValueError, set_neg)
+
         def set_too_big():
             pool.size = 3
+
         self.assertRaises(ValueError, set_too_big)
         pool.size = 0
         self.assertEqual(pool.size, 0)
@@ -298,7 +310,7 @@ class TestSize(TestCase):
 class TestRef(TestCase):
 
     def test(self):
-        pool = self.pool=ThreadPool(2)
+        pool = self.pool = ThreadPool(2)
 
         refs = []
         obj = SomeClass()
@@ -312,7 +324,7 @@ class TestRef(TestCase):
             # but in a thread pool and see that arguments', result's and func's references are not leaked
             result = pool.apply(func, (Object(), ), {'kwarg1': Object()})
             assert isinstance(result, Object), repr(result)
-            gevent.sleep(0)  # XXX should not be needed
+            gevent.sleep(0.1)  # XXX should not be needed
 
             refs.append(weakref.ref(func))
             del func, result

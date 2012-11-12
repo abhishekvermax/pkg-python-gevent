@@ -64,7 +64,7 @@ class Settings:
 
 class TestCase(greentest.TestCase):
 
-    __timeout__ = 10
+    __timeout__ = 5
 
     def cleanup(self):
         if getattr(self, 'server', None) is not None:
@@ -78,7 +78,8 @@ class TestCase(greentest.TestCase):
         return sock
 
     def makefile(self, timeout=0.1, bufsize=1):
-        sock = socket.create_connection((self.server.server_host, self.server.server_port))
+        sock = socket.socket()
+        sock.connect((self.server.server_host, self.server.server_port))
         fobj = sock.makefile(bufsize=bufsize)
         fobj._sock.settimeout(timeout)
         return fobj
@@ -262,7 +263,7 @@ class TestDefaultSpawn(TestCase):
             except socket.error:
                 ex = sys.exc_info()[1]
                 if ex.args[0] == 10053:
-                    pass # "established connection was aborted by the software in your host machine"
+                    pass  # "established connection was aborted by the software in your host machine"
                 elif ex.args[0] == errno.ECONNRESET:
                     pass
                 else:

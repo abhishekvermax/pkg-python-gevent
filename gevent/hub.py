@@ -4,13 +4,15 @@ from __future__ import absolute_import
 import sys
 import os
 import traceback
-try:
-    from gevent._util import set_exc_info
-except ImportError, ex:
-    sys.stderr.write('Failed to import set_exc_info: %s\n' % ex)
 
-    def set_exc_info(*args):
-        pass
+import greenlet  # http://pypi.python.org/pypi/greenlet/
+greenlet_version = getattr(greenlet, '__version__', None)
+if greenlet_version:
+    greenlet_version_info = [int(x) for x in greenlet_version.split('.')]
+if not greenlet_version or greenlet_version_info[:3] < [0, 3, 2]:
+    raise ImportError('''Your version of greenlet (%s) is too old (required >= 0.3.2)
+             You can get a newer version of greenlet from http://pypi.python.org/pypi/greenlet/''' % (greenlet_version, ))
+from greenlet import greenlet, getcurrent, GreenletExit
 
 
 __all__ = ['getcurrent',
@@ -36,24 +38,6 @@ else:
     integer_types = (int, long)
 
 
-def __import_py_magic_greenlet():
-    try:
-        from py.magic import greenlet
-        return greenlet
-    except ImportError:
-        pass
-
-try:
-    from greenlet import greenlet
-except ImportError:
-    greenlet = __import_py_magic_greenlet()
-    if greenlet is None:
-        raise
-
-getcurrent = greenlet.getcurrent
-GreenletExit = greenlet.GreenletExit
-
-
 # In greenlet >= 0.3.2, GreenletExit is a subclass of BaseException
 # In greenlet <= 0.3.1, GreenletExit is a subclass of Exception
 # Since, GreenletExit is a part of gevent's public interface, we want
@@ -73,19 +57,10 @@ get_ident = thread.get_ident
 MAIN_THREAD = get_ident()
 
 
-def _switch_helper(function, args, kwargs):
-    # work around the fact that greenlet.switch does not support keyword args
-    return function(*args, **kwargs)
-
-
 def spawn_raw(function, *args, **kwargs):
     hub = get_hub()
-    if kwargs:
-        g = greenlet(_switch_helper, hub)
-        hub.loop.run_callback(g.switch, function, args, kwargs)
-    else:
-        g = greenlet(function, hub)
-        hub.loop.run_callback(g.switch, *args)
+    g = greenlet(function, hub)
+    hub.loop.run_callback(g.switch, *args, **kwargs)
     return g
 
 
@@ -105,11 +80,11 @@ def sleep(seconds=0, ref=True):
     hub = get_hub()
     loop = hub.loop
     if seconds <= 0:
-        watcher = loop.idle(ref=ref)
-        watcher.priority = loop.MAXPRI
+        waiter = Waiter()
+        loop.run_callback(waiter.switch)
+        waiter.get()
     else:
-        watcher = loop.timer(seconds, ref=ref)
-    hub.wait(watcher)
+        hub.wait(loop.timer(seconds, ref=ref))
 
 
 def idle(priority=0):
@@ -343,7 +318,18 @@ class Hub(greenlet):
         if current is self or current is self.parent or self.loop is None:
             self.parent.throw(type, value)
         else:
-            self.loop.run_callback(self.parent.throw, type, value)
+            # in case system error was handled and life goes on
+            # switch back to this greenlet as well
+            cb = None
+            try:
+                cb = self.loop.run_callback(current.switch)
+            except:
+                traceback.print_exc()
+            try:
+                self.parent.throw(type, value)
+            finally:
+                if cb is not None:
+                    cb.stop()
 
     def print_exception(self, context, type, value, tb):
         traceback.print_exception(type, value, tb)
@@ -358,15 +344,10 @@ class Hub(greenlet):
             sys.stderr.write('%s failed with %s\n\n' % (context, getattr(type, '__name__', 'exception'), ))
 
     def switch(self):
-        exc_type, exc_value = sys.exc_info()[:2]
-        try:
-            switch_out = getattr(getcurrent(), 'switch_out', None)
-            if switch_out is not None:
-                switch_out()
-            exc_clear()
-            return greenlet.switch(self)
-        finally:
-            set_exc_info(exc_type, exc_value)
+        switch_out = getattr(getcurrent(), 'switch_out', None)
+        if switch_out is not None:
+            switch_out()
+        return greenlet.switch(self)
 
     def switch_out(self):
         raise AssertionError('Impossible to call blocking function in the event loop callback')
@@ -408,15 +389,14 @@ class Hub(greenlet):
         # It is still possible to kill this greenlet with throw. However, in that case
         # switching to it is no longer safe, as switch will return immediatelly
 
-    def join(self, timeout=None, event=None):
+    def join(self, timeout=None):
         """Wait for the event loop to finish. Exits only when there are
         no more spawned greenlets, started servers, active timeouts or watchers.
 
         If *timeout* is provided, wait no longer for the specified number of seconds.
-        If *event* was provided, exit when it was signalled with :meth:`Event.set` method.
 
         Returns True if exited because the loop finished execution.
-        Returns False if exited because of timeout expired or event was signalled.
+        Returns False if exited because of timeout expired.
         """
         assert getcurrent() is self.parent, "only possible from the MAIN greenlet"
         if self.dead:
@@ -424,26 +404,18 @@ class Hub(greenlet):
 
         waiter = Waiter()
 
-        if event is not None:
-            switch = waiter.switch
-            event.rawlink(switch)
+        if timeout is not None:
+            timeout = self.loop.timer(timeout, ref=False)
+            timeout.start(waiter.switch)
 
         try:
-            if timeout is not None:
-                timeout = self.loop.timer(timeout, ref=False)
-                timeout.start(waiter.switch)
-
             try:
-                try:
-                    waiter.get()
-                except LoopExit:
-                    return True
-            finally:
-                if timeout is not None:
-                    timeout.stop()
+                waiter.get()
+            except LoopExit:
+                return True
         finally:
-            if event is not None:
-                event.unlink(switch)
+            if timeout is not None:
+                timeout.stop()
         return False
 
     def destroy(self, destroy_loop=None):
@@ -620,6 +592,64 @@ class Waiter(object):
 
     # can also have a debugging version, that wraps the value in a tuple (self, value) in switch()
     # and unwraps it in wait() thus checking that switch() was indeed called
+
+
+def iwait(objects, timeout=None):
+    # QQQ would be nice to support iterable here that can be generated slowly (why?)
+    waiter = Waiter()
+    switch = waiter.switch
+    if timeout is not None:
+        timer = get_hub().loop.timer(timeout, priority=-1)
+        timer.start(waiter.switch, _NONE)
+    try:
+        count = len(objects)
+        for obj in objects:
+            obj.rawlink(switch)
+        for _ in xrange(count):
+            item = waiter.get()
+            waiter.clear()
+            if item is _NONE:
+                return
+            yield item
+    finally:
+        if timeout is not None:
+            timer.stop()
+        for obj in objects:
+            unlink = getattr(obj, 'unlink', None)
+            if unlink:
+                try:
+                    unlink(switch)
+                except:
+                    traceback.print_exc()
+
+
+def wait(objects=None, timeout=None, count=None):
+    if objects is None:
+        return get_hub().join(timeout=timeout)
+    result = []
+    if count is None:
+        return list(iwait(objects, timeout))
+    for obj in iwait(objects=objects, timeout=timeout):
+        result.append(obj)
+        count -= 1
+        if count <= 0:
+            break
+    return result
+
+
+class linkproxy(object):
+    __slots__ = ['callback', 'obj']
+
+    def __init__(self, callback, obj):
+        self.callback = callback
+        self.obj = obj
+
+    def __call__(self, *args):
+        callback = self.callback
+        obj = self.obj
+        self.callback = None
+        self.obj = None
+        callback(obj)
 
 
 class _NONE(object):

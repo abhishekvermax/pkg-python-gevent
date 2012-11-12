@@ -6,8 +6,8 @@ import types
 import gc
 import signal
 import traceback
-from gevent.event import Event
-from gevent.hub import get_hub
+from gevent.event import AsyncResult
+from gevent.hub import get_hub, linkproxy
 from gevent.fileobject import FileObject
 from gevent.greenlet import Greenlet, joinall
 spawn = Greenlet.spawn
@@ -65,6 +65,10 @@ for name in __imports__[:]:
     except AttributeError:
         __imports__.remove(name)
         __extra__.append(name)
+
+if sys.version_info[:2] <= (2, 6):
+    __implements__.remove('check_output')
+    __extra__.append('check_output')
 
 _subprocess = getattr(__subprocess__, '_subprocess', None)
 _NONE = object()
@@ -139,16 +143,14 @@ def check_output(*popenargs, **kwargs):
 
     The arguments are the same as for the Popen constructor.  Example:
 
-    >>> check_output(["ls", "-l", "/dev/null"])
-    'crw-rw-rw- 1 root root 1, 3 Oct 18  2007 /dev/null\n'
+    >>> check_output(["ls", "-1", "/dev/null"])
+    '/dev/null\n'
 
     The stdout argument is not allowed as it is used internally.
     To capture standard error in the result, use stderr=STDOUT.
 
-    >>> check_output(["/bin/sh", "-c",
-    ...               "ls -l non_existent_file ; exit 0"],
-    ...              stderr=STDOUT)
-    'ls: non_existent_file: No such file or directory\n'
+    >>> check_output(["/bin/sh", "-c", "echo hello world"], stderr=STDOUT)
+    'hello world\n'
     """
     if 'stdout' in kwargs:
         raise ValueError('stdout argument not allowed, it will be overridden.')
@@ -186,6 +188,7 @@ class Popen(object):
             if threadpool is None:
                 threadpool = hub.threadpool
             self.threadpool = threadpool
+            self._waiting = False
         else:
             # POSIX
             if startupinfo is not None:
@@ -196,7 +199,6 @@ class Popen(object):
                                  "platforms")
             assert threadpool is None
             self._loop = hub.loop
-            self._event = Event()
 
         self.stdin = None
         self.stdout = None
@@ -204,6 +206,7 @@ class Popen(object):
         self.pid = None
         self.returncode = None
         self.universal_newlines = universal_newlines
+        self.result = AsyncResult()
 
         # Input and output objects. The general principle is like
         # this:
@@ -257,8 +260,12 @@ class Popen(object):
 
     def _on_child(self, watcher):
         watcher.stop()
-        self._handle_exitstatus(watcher.rstatus)
-        self._event.set()
+        status = watcher.rstatus
+        if os.WIFSIGNALED(status):
+            self.returncode = -os.WTERMSIG(status)
+        else:
+            self.returncode = os.WEXITSTATUS(status)
+        self.result.set(self.returncode)
 
     def communicate(self, input=None):
         """Interact with process: Send data to stdin.  Read data from
@@ -297,6 +304,10 @@ class Popen(object):
 
     def poll(self):
         return self._internal_poll()
+
+    def rawlink(self, callback):
+        self.result.rawlink(linkproxy(callback, self))
+    # XXX unlink
 
     if mswindows:
         #
@@ -361,13 +372,12 @@ class Popen(object):
         def _make_inheritable(self, handle):
             """Return a duplicate of handle, which is inheritable"""
             return DuplicateHandle(GetCurrentProcess(),
-                                handle, GetCurrentProcess(), 0, 1,
-                                DUPLICATE_SAME_ACCESS)
+                                   handle, GetCurrentProcess(), 0, 1,
+                                   DUPLICATE_SAME_ACCESS)
 
         def _find_w9xpopen(self):
             """Find and return absolut path to w9xpopen.exe"""
-            w9xpopen = os.path.join(
-                            os.path.dirname(GetModuleFileName(0)),
+            w9xpopen = os.path.join(os.path.dirname(GetModuleFileName(0)),
                                     "w9xpopen.exe")
             if not os.path.exists(w9xpopen):
                 # Eeek - file-not-found - possibly an embedding
@@ -405,8 +415,7 @@ class Popen(object):
                 startupinfo.wShowWindow = SW_HIDE
                 comspec = os.environ.get("COMSPEC", "cmd.exe")
                 args = '{} /c "{}"'.format(comspec, args)
-                if (GetVersion() >= 0x80000000 or
-                    os.path.basename(comspec).lower() == "command.com"):
+                if GetVersion() >= 0x80000000 or os.path.basename(comspec).lower() == "command.com":
                     # Win9x, or using command.com on NT. We need to
                     # use the w9xpopen intermediate program. For more
                     # information, see KB Q150956
@@ -424,13 +433,13 @@ class Popen(object):
             # Start the process
             try:
                 hp, ht, pid, tid = CreateProcess(executable, args,
-                                         # no special security
-                                         None, None,
-                                         int(not close_fds),
-                                         creationflags,
-                                         env,
-                                         cwd,
-                                         startupinfo)
+                                                 # no special security
+                                                 None, None,
+                                                 int(not close_fds),
+                                                 creationflags,
+                                                 env,
+                                                 cwd,
+                                                 startupinfo)
             except pywintypes.error, e:
                 # Translate pywintypes.error to WindowsError, which is
                 # a subclass of OSError.  FIXME: We should really
@@ -463,18 +472,32 @@ class Popen(object):
             if self.returncode is None:
                 if WaitForSingleObject(self._handle, 0) == WAIT_OBJECT_0:
                     self.returncode = GetExitCodeProcess(self._handle)
+                    self.result.set(self.returncode)
             return self.returncode
+
+        def rawlink(self, callback):
+            if not self.result.ready() and not self._waiting:
+                self._waiting = True
+                Greenlet.spawn(self._wait)
+            self.result.rawlink(linkproxy(callback, self))
+            # XXX unlink
+
+        def _blocking_wait(self):
+            WaitForSingleObject(self._handle, INFINITE)
+            self.returncode = GetExitCodeProcess(self._handle)
+            return self.returncode
+
+        def _wait(self):
+            self.threadpool.spawn(self._blocking_wait).rawlink(self.result)
 
         def wait(self, timeout=None):
             """Wait for child process to terminate.  Returns returncode
             attribute."""
-            # XXX timeout is ignored now
-            # XXX do not launch more than one WaitForSingleObject
-            # XXX add 'event' attribute
             if self.returncode is None:
-                self.threadpool.apply_e(BaseException, WaitForSingleObject, (self._handle, INFINITE))
-                self.returncode = GetExitCodeProcess(self._handle)
-            return self.returncode
+                if not self._waiting:
+                    self._waiting = True
+                    self._wait()
+            return self.result.wait(timeout=timeout)
 
         def send_signal(self, sig):
             """Send a signal to the process
@@ -688,9 +711,10 @@ class Popen(object):
                             exc_value.child_traceback = ''.join(exc_lines)
                             os.write(errpipe_write, pickle.dumps(exc_value))
 
-                        # This exitcode won't be reported to applications, so it
-                        # really doesn't matter what we return.
-                        os._exit(255)
+                        finally:
+                            # This exitcode won't be reported to applications, so it
+                            # really doesn't matter what we return.
+                            os._exit(255)
 
                     # Parent
                     self._watcher = self._loop.child(self.pid)
@@ -710,9 +734,8 @@ class Popen(object):
                     os.close(errwrite)
 
                 # Wait for exec to fail or succeed; possibly raising exception
-                # Exception limited to 1M
                 errpipe_read = FileObject(errpipe_read, 'rb')
-                data = errpipe_read.read(1048576)
+                data = errpipe_read.read()
             finally:
                 if hasattr(errpipe_read, 'close'):
                     errpipe_read.close()
@@ -745,9 +768,7 @@ class Popen(object):
         def wait(self, timeout=None):
             """Wait for child process to terminate.  Returns returncode
             attribute."""
-            if self.returncode is None:
-                self._event.wait(timeout=timeout)
-            return self.returncode
+            return self.result.wait(timeout=timeout)
 
         def send_signal(self, sig):
             """Send a signal to the process
