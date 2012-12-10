@@ -8,9 +8,9 @@ See http://www.gevent.org/ for the documentation.
 
 from __future__ import absolute_import
 
-version_info = (1, 0, 0, 'candidate', 1)
-__version__ = '1.0rc1'
-__changeset__ = '1.0rc1-0-g92bff11'
+version_info = (1, 0, 0, 'candidate', 2)
+__version__ = '1.0rc2'
+__changeset__ = '1.0rc2-0-g454a77c'
 
 
 __all__ = ['get_hub',
@@ -45,3 +45,15 @@ except ImportError:
     __all__.remove('fork')
 
 run = wait  # XXX to be deleted (soon)
+
+
+# the following makes hidden imports visible to freezing tools like
+# py2exe. see https://github.com/SiteSupport/gevent/issues/181
+def __dependencies_for_freezing():
+    from gevent import core, resolver_thread, resolver_ares, socket,\
+        threadpool, thread, threading, select, subprocess
+    import pprint
+    import traceback
+    import signal
+
+del __dependencies_for_freezing

@@ -13,7 +13,7 @@ struct PyGeventForkObject;
 struct PyGeventAsyncObject;
 struct PyGeventStatObject;
 
-/* "gevent/core.pyx":223
+/* "gevent/core.pyx":224
  * 
  * 
  * cdef public class loop [object PyGeventLoopObject, type PyGeventLoop_Type]:             # <<<<<<<<<<<<<<
@@ -25,12 +25,13 @@ struct PyGeventLoopObject {
   struct __pyx_vtabstruct_6gevent_4core_loop *__pyx_vtab;
   struct ev_loop *_ptr;
   PyObject *error_handler;
-  struct ev_prepare _signal_checker;
+  struct ev_prepare _prepare;
   PyObject *_callbacks;
+  struct ev_timer _timer0;
   struct ev_timer _periodic_signal_checker;
 };
 
-/* "gevent/core.pyx":513
+/* "gevent/core.pyx":528
  * 
  * 
  * cdef public class callback [object PyGeventCallbackObject, type PyGeventCallback_Type]:             # <<<<<<<<<<<<<<
@@ -43,7 +44,7 @@ struct PyGeventCallbackObject {
   PyObject *args;
 };
 
-/* "gevent/core.pyx":581
+/* "gevent/core.pyx":596
  * 
  * 
  * cdef public class watcher [object PyGeventWatcherObject, type PyGeventWatcher_Type]:             # <<<<<<<<<<<<<<
@@ -54,7 +55,7 @@ struct PyGeventWatcherObject {
   PyObject_HEAD
 };
 
-/* "gevent/core.pyx":606
+/* "gevent/core.pyx":621
  * 
  * 
  * cdef public class io(watcher) [object PyGeventIOObject, type PyGeventIO_Type]:             # <<<<<<<<<<<<<<
@@ -70,7 +71,7 @@ struct PyGeventIOObject {
   struct ev_io _watcher;
 };
 
-/* "gevent/core.pyx":779
+/* "gevent/core.pyx":794
  * 
  * 
  * cdef public class timer(watcher) [object PyGeventTimerObject, type PyGeventTimer_Type]:             # <<<<<<<<<<<<<<
@@ -86,7 +87,7 @@ struct PyGeventTimerObject {
   struct ev_timer _watcher;
 };
 
-/* "gevent/core.pyx":909
+/* "gevent/core.pyx":924
  * 
  * 
  * cdef public class signal(watcher) [object PyGeventSignalObject, type PyGeventSignal_Type]:             # <<<<<<<<<<<<<<
@@ -102,7 +103,7 @@ struct PyGeventSignalObject {
   struct ev_signal _watcher;
 };
 
-/* "gevent/core.pyx":1022
+/* "gevent/core.pyx":1037
  * 
  * 
  * cdef public class idle(watcher) [object PyGeventIdleObject, type PyGeventIdle_Type]:             # <<<<<<<<<<<<<<
@@ -118,7 +119,7 @@ struct PyGeventIdleObject {
   struct ev_idle _watcher;
 };
 
-/* "gevent/core.pyx":1129
+/* "gevent/core.pyx":1144
  * 
  * 
  * cdef public class prepare(watcher) [object PyGeventPrepareObject, type PyGeventPrepare_Type]:             # <<<<<<<<<<<<<<
@@ -134,7 +135,7 @@ struct PyGeventPrepareObject {
   struct ev_prepare _watcher;
 };
 
-/* "gevent/core.pyx":1236
+/* "gevent/core.pyx":1251
  * 
  * 
  * cdef public class fork(watcher) [object PyGeventForkObject, type PyGeventFork_Type]:             # <<<<<<<<<<<<<<
@@ -150,7 +151,7 @@ struct PyGeventForkObject {
   struct ev_fork _watcher;
 };
 
-/* "gevent/core.pyx":1343
+/* "gevent/core.pyx":1358
  * 
  * 
  * cdef public class async(watcher) [object PyGeventAsyncObject, type PyGeventAsync_Type]:             # <<<<<<<<<<<<<<
@@ -166,7 +167,7 @@ struct PyGeventAsyncObject {
   struct ev_async _watcher;
 };
 
-/* "gevent/core.pyx":1587
+/* "gevent/core.pyx":1602
  * 
  * 
  * cdef public class stat(watcher) [object PyGeventStatObject, type PyGeventStat_Type]:             # <<<<<<<<<<<<<<
