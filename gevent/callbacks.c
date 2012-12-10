@@ -36,6 +36,10 @@ static void gevent_handle_error(struct PyGeventLoopObject* loop, PyObject* conte
 
 
 static CYTHON_INLINE void gevent_check_signals(struct PyGeventLoopObject* loop) {
+    if (!ev_is_default_loop(loop->_ptr)) {
+        /* only reporting signals on the default loop */
+        return;
+    }
     PyErr_CheckSignals();
     if (PyErr_Occurred()) gevent_handle_error(loop, Py_None);
 }
@@ -49,6 +53,7 @@ static CYTHON_INLINE void gevent_check_signals(struct PyGeventLoopObject* loop) 
 #define GIL_ENSURE  ___save = PyGILState_Ensure();
 #define GIL_RELEASE  PyGILState_Release(___save);
 #else
+#define GIL_DECLARE
 #define GIL_ENSURE
 #define GIL_RELEASE
 #endif
@@ -135,9 +140,8 @@ end:
 
 
 static void gevent_call(struct PyGeventLoopObject* loop, struct PyGeventCallbackObject* cb) {
-    GIL_DECLARE;
+    /* no need for GIL here because it is only called from run_callbacks which already has GIL */
     PyObject *result, *callback, *args;
-    GIL_ENSURE;
     if (!loop || !cb)
         return;
     callback = cb->callback;
@@ -159,7 +163,7 @@ static void gevent_call(struct PyGeventLoopObject* loop, struct PyGeventCallback
         Py_DECREF(result);
     }
     else {
-        gevent_handle_error(loop, cb);
+        gevent_handle_error(loop, (PyObject*)cb);
     }
 
     Py_INCREF(Py_None);
@@ -169,7 +173,6 @@ static void gevent_call(struct PyGeventLoopObject* loop, struct PyGeventCallback
     Py_DECREF(callback);
     Py_DECREF(args);
     Py_DECREF(loop);
-    GIL_RELEASE;
 }
 
 
@@ -189,7 +192,7 @@ static void gevent_run_callbacks(struct ev_loop *_loop, void *watcher, int reven
     PyObject *result;
     GIL_DECLARE;
     GIL_ENSURE;
-    loop = GET_OBJECT(PyGeventLoopObject, watcher, _signal_checker);
+    loop = GET_OBJECT(PyGeventLoopObject, watcher, _prepare);
     Py_INCREF(loop);
     gevent_check_signals(loop);
     result = ((struct __pyx_vtabstruct_6gevent_4core_loop *)loop->__pyx_vtab)->_run_callbacks(loop);

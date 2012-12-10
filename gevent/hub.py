@@ -38,14 +38,6 @@ else:
     integer_types = (int, long)
 
 
-# In greenlet >= 0.3.2, GreenletExit is a subclass of BaseException
-# In greenlet <= 0.3.1, GreenletExit is a subclass of Exception
-# Since, GreenletExit is a part of gevent's public interface, we want
-# it to be consistent, so if we got older greenlet, we monkey patch
-# GreenletExit's __bases__
-if GreenletExit.__bases__[0] is Exception:
-    GreenletExit.__bases__ = (BaseException, )
-
 if sys.version_info[0] <= 2:
     import thread
 else:
@@ -69,10 +61,6 @@ def sleep(seconds=0, ref=True):
 
     *seconds* may be specified as an integer, or a float if fractional seconds
     are desired.
-
-    If *seconds* is equal to or less than zero, yield control the other coroutines
-    without actually putting the process to sleep. The :class:`core.idle` watcher
-    with the highest priority is used to achieve that.
 
     If *ref* is false, the greenlet running sleep() will not prevent gevent.run()
     from exiting.
@@ -198,13 +186,6 @@ def set_hub(hub):
     _threadlocal.hub = hub
 
 
-if sys.version_info[0] >= 3:
-    def exc_clear():
-        pass
-else:
-    exc_clear = sys.exc_clear
-
-
 def _import(path):
     if isinstance(path, list):
         if not path:
@@ -282,8 +263,8 @@ class Hub(greenlet):
                 raise TypeError("Unexpected argument: default")
             self.loop = loop
         else:
-            if default is None:
-                default = get_ident() == MAIN_THREAD
+            if default is None and get_ident() != MAIN_THREAD:
+                default = False
             loop_class = _import(self.loop_class)
             if loop is None:
                 loop = self.backend
@@ -545,29 +526,33 @@ class Waiter(object):
 
     def switch(self, value=None):
         """Switch to the greenlet if one's available. Otherwise store the value."""
-        if self.greenlet is None:
+        greenlet = self.greenlet
+        if greenlet is None:
             self.value = value
             self._exception = None
         else:
             assert getcurrent() is self.hub, "Can only use Waiter.switch method from the Hub greenlet"
+            switch = greenlet.switch
             try:
-                self.greenlet.switch(value)
+                switch(value)
             except:
-                self.hub.handle_error(self.greenlet.switch, *sys.exc_info())
+                self.hub.handle_error(switch, *sys.exc_info())
 
     def switch_args(self, *args):
         return self.switch(args)
 
     def throw(self, *throw_args):
         """Switch to the greenlet with the exception. If there's no greenlet, store the exception."""
-        if self.greenlet is None:
+        greenlet = self.greenlet
+        if greenlet is None:
             self._exception = throw_args
         else:
             assert getcurrent() is self.hub, "Can only use Waiter.switch method from the Hub greenlet"
+            throw = greenlet.throw
             try:
-                self.greenlet.throw(*throw_args)
+                throw(*throw_args)
             except:
-                self.hub.handle_error(self.greenlet.throw, *sys.exc_info())
+                self.hub.handle_error(throw, *sys.exc_info())
 
     def get(self):
         """If a value/an exception is stored, return/raise it. Otherwise until switch() or throw() is called."""
